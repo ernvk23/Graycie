@@ -32,7 +32,7 @@ class ForegroundAccessibilityService : AccessibilityService() {
     }
 
     private fun refreshPackages() {
-        launchablePackages = AppCatalog(this).apps().map { it.packageName }.toSet()
+        launchablePackages = AppCatalog(this).packageNames()
         homePackages = controller.activeHomePackages()
     }
 
