@@ -7,6 +7,9 @@ import android.content.Context
 import android.os.Build
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
+import android.view.ContextThemeWrapper
+import android.view.ViewGroup
+import android.widget.NumberPicker
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +27,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,6 +35,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -48,17 +53,21 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -80,6 +89,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
@@ -112,6 +122,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import now.abhi.graycie.InstalledApp
@@ -119,9 +130,11 @@ import now.abhi.graycie.ManagerSnapshot
 import now.abhi.graycie.ManagerStatus
 import now.abhi.graycie.ManagerUiState
 import now.abhi.graycie.ManagerViewModel
+import now.abhi.graycie.MAX_GRAY_AFTER_MINUTES
 import now.abhi.graycie.Policy
 import now.abhi.graycie.R
 import now.abhi.graycie.SnoozeCoordinator
+import now.abhi.graycie.USAGE_ACCESS_ERROR
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
@@ -157,6 +170,7 @@ object ContinuousSquircle : Shape {
 fun ManagerScreen(
     viewModel: ManagerViewModel,
     openAccessibilitySettings: () -> Unit,
+    openUsageAccessSettings: () -> Unit,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     ManagerContent(
@@ -164,6 +178,9 @@ fun ManagerScreen(
         setQuery = viewModel::setQuery,
         setEnabled = viewModel::setEnabled,
         setPolicy = viewModel::setPolicy,
+        setDefaultGrayAfterMinutes = viewModel::setDefaultGrayAfterMinutes,
+        resetAllGrayAfterMinutes = viewModel::resetAllGrayAfterMinutes,
+        setGrayAfterMinutes = viewModel::setGrayAfterMinutes,
         togglePackage = viewModel::togglePackage,
         toggleSnoozePackage = viewModel::toggleSnoozePackage,
         openSafely = viewModel::openSafely,
@@ -171,6 +188,7 @@ fun ManagerScreen(
         refresh = viewModel::onResume,
         refreshApps = viewModel::loadApps,
         openAccessibilitySettings = openAccessibilitySettings,
+        openUsageAccessSettings = openUsageAccessSettings,
     )
 }
 
@@ -180,6 +198,9 @@ fun ManagerContent(
     setQuery: (String) -> Unit,
     setEnabled: (Boolean) -> Unit,
     setPolicy: (Policy) -> Unit,
+    setDefaultGrayAfterMinutes: (Int) -> Unit = {},
+    resetAllGrayAfterMinutes: () -> Unit = {},
+    setGrayAfterMinutes: (String, Int?) -> Unit = { _, _ -> },
     togglePackage: (String, Boolean) -> Unit,
     toggleSnoozePackage: (String, Boolean) -> Boolean = { _, _ -> true },
     openSafely: (String) -> Unit = {},
@@ -187,6 +208,7 @@ fun ManagerContent(
     refresh: () -> Unit,
     refreshApps: () -> Unit,
     openAccessibilitySettings: () -> Unit,
+    openUsageAccessSettings: () -> Unit = {},
 ) {
     var destinationName by rememberSaveable { mutableStateOf(Destination.HOME.name) }
     var movingForward by remember { mutableStateOf(true) }
@@ -279,6 +301,9 @@ fun ManagerContent(
                             onBack = { navigate(Destination.HOME) },
                             setQuery = setQuery,
                             setPolicy = setPolicy,
+                            setDefaultGrayAfterMinutes = setDefaultGrayAfterMinutes,
+                            resetAllGrayAfterMinutes = resetAllGrayAfterMinutes,
+                            setGrayAfterMinutes = setGrayAfterMinutes,
                             togglePackage = togglePackage,
                             toggleSnooze = { _, _ -> },
                             openSafely = openSafely,
@@ -322,6 +347,7 @@ fun ManagerContent(
                             },
                             onRefresh = refresh,
                             onOpenAccessibility = openAccessibilitySettings,
+                            onOpenUsageAccess = openUsageAccessSettings,
                         )
                     }
                 }
@@ -742,9 +768,17 @@ private fun AppSelectionScreen(
     toggleSnooze: (InstalledApp, Boolean) -> Unit,
     openSafely: (String) -> Unit,
     refreshApps: () -> Unit,
+    setDefaultGrayAfterMinutes: (Int) -> Unit = {},
+    resetAllGrayAfterMinutes: () -> Unit = {},
+    setGrayAfterMinutes: (String, Int?) -> Unit = { _, _ -> },
 ) {
     val selectedPackages = if (snoozeMode) manager.snoozePackages else manager.selectedPackages
-    val visibleApps = state.visibleApps(selectedPackages)
+    val customPackages = if (snoozeMode) emptySet() else manager.grayAfterMinutes.keys
+    val visibleApps = remember(state.apps, state.query, selectedPackages, customPackages) {
+        state.visibleApps(selectedPackages, customPackages)
+    }
+    val hasPositiveDelay = manager.defaultGrayAfterMinutes > 0 ||
+        manager.grayAfterMinutes.values.any { it > 0 }
     LazyColumn(
         modifier = Modifier.fillMaxSize().widthIn(max = 720.dp)
             .testTag(if (snoozeMode) "auto-snooze-screen" else "grayscale-control-screen"),
@@ -773,6 +807,14 @@ private fun AppSelectionScreen(
         }
         if (!snoozeMode) {
             item("policy-tabs") { PolicyTabs(manager.policy, !state.mutating, setPolicy) }
+            item("default-timer") {
+                DefaultTimerRow(
+                    minutes = manager.defaultGrayAfterMinutes,
+                    enabled = !state.mutating,
+                    changed = setDefaultGrayAfterMinutes,
+                    resetAll = resetAllGrayAfterMinutes,
+                )
+            }
         }
         item("search") { SearchField(state.query, setQuery) }
         item("apps-heading") {
@@ -782,7 +824,11 @@ private fun AppSelectionScreen(
                 refresh = refreshApps,
             )
         }
-        val shownError = state.transientError ?: manager.error
+        val usageAccessMissing = !snoozeMode && hasPositiveDelay && !manager.usageAccessGranted
+        val shownError = state.transientError ?: manager.error ?: when {
+            usageAccessMissing -> USAGE_ACCESS_ERROR
+            else -> manager.usageError.takeIf { !snoozeMode && hasPositiveDelay }
+        }
         if (shownError != null) {
             item("error") {
                 Text(
@@ -819,11 +865,23 @@ private fun AppSelectionScreen(
             }
         }
         items(visibleApps, key = { it.packageName }) { app ->
+            val targetsThisApp = !app.isHome && app.packageName != manager.applicationId &&
+                if (manager.policy == Policy.ONLY_SELECTED) {
+                    app.packageName in manager.selectedPackages
+                } else {
+                    app.packageName !in manager.selectedPackages
+                }
             AppRow(
                 app = app,
                 manager = manager,
                 snoozeMode = snoozeMode,
                 busy = state.mutating,
+                timerVisible = !snoozeMode && (targetsThisApp || app.packageName in customPackages),
+                timerMinutes = manager.grayAfterMinutes[app.packageName]
+                    ?: manager.defaultGrayAfterMinutes,
+                timerOverridden = app.packageName in manager.grayAfterMinutes,
+                defaultTimerMinutes = manager.defaultGrayAfterMinutes,
+                setTimer = { minutes -> setGrayAfterMinutes(app.packageName, minutes) },
                 toggle = { selected ->
                     if (snoozeMode) toggleSnooze(app, selected)
                     else togglePackage(app.packageName, selected)
@@ -890,6 +948,206 @@ private fun PolicyTabs(policy: Policy, enabled: Boolean, changed: (Policy) -> Un
 }
 
 @Composable
+private fun DefaultTimerRow(minutes: Int, enabled: Boolean, changed: (Int) -> Unit, resetAll: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Grayscale delay", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "default daily use; app-specific times override",
+                style = MaterialTheme.typography.bodySmall,
+                color = GraycieMuted,
+            )
+        }
+        TimerPicker(
+            label = timerLabel(minutes),
+            selected = minutes,
+            defaultMinutes = null,
+            enabled = enabled,
+            highlight = true,
+            onSelected = { value -> value?.let(changed) },
+            testTag = "default-timer",
+            description = "Global grayscale delay",
+            onResetAll = resetAll,
+        )
+    }
+}
+
+@Composable
+private fun TimerPicker(
+    label: String,
+    selected: Int,
+    defaultMinutes: Int?,
+    enabled: Boolean,
+    highlight: Boolean,
+    onSelected: (Int?) -> Unit,
+    testTag: String,
+    description: String,
+    onResetAll: (() -> Unit)? = null,
+) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    TextButton(
+        onClick = { open = true },
+        enabled = enabled,
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+        modifier = Modifier.testTag(testTag).semantics {
+            contentDescription = "$description: $label"
+        },
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (highlight) GraycieAmberSoft else GraycieMuted,
+        )
+    }
+    if (open) {
+        TimerDialog(
+            minutes = selected,
+            defaultMinutes = defaultMinutes,
+            enabled = enabled,
+            onDismiss = { open = false },
+            onSelected = { minutes ->
+                open = false
+                onSelected(minutes)
+            },
+            onResetAll = onResetAll?.let { reset ->
+                {
+                    open = false
+                    reset()
+                }
+            },
+        )
+    }
+}
+
+private val TimerControlShape = RoundedCornerShape(16.dp)
+
+@Composable
+private fun TimerDialog(
+    minutes: Int,
+    defaultMinutes: Int?,
+    enabled: Boolean,
+    onDismiss: () -> Unit,
+    onSelected: (Int?) -> Unit,
+    onResetAll: (() -> Unit)?,
+) {
+    val initialMinutes = minutes.coerceIn(0, MAX_GRAY_AFTER_MINUTES)
+    var hours by rememberSaveable { mutableStateOf(initialMinutes / 60) }
+    var remainingMinutes by rememberSaveable { mutableStateOf(initialMinutes % 60) }
+    val maxMinutes = if (hours == MAX_GRAY_AFTER_MINUTES / 60) 0 else 59
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = GraycieSurfaceRaised,
+        title = { Text("Grayscale delay") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(0, 5, 10, 15, 20, 30, 60).forEach { value ->
+                        FilterChip(
+                            selected = hours * 60 + remainingMinutes == value,
+                            onClick = {
+                                hours = value / 60
+                                remainingMinutes = value % 60
+                            },
+                            enabled = enabled,
+                            shape = TimerControlShape,
+                            label = { Text(timerLabel(value)) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+                HorizontalDivider(color = GraycieBorder.copy(alpha = 0.55f))
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    DurationWheel("Hours", hours, MAX_GRAY_AFTER_MINUTES / 60, Modifier.weight(1f)) {
+                        hours = it
+                        if (hours == MAX_GRAY_AFTER_MINUTES / 60) remainingMinutes = 0
+                    }
+                    DurationWheel("Minutes", remainingMinutes, maxMinutes, Modifier.weight(1f)) {
+                        remainingMinutes = it
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                HorizontalDivider(color = GraycieBorder.copy(alpha = 0.55f))
+                Spacer(Modifier.height(20.dp))
+                if (onResetAll != null) {
+                    OutlinedButton(
+                        onClick = onResetAll,
+                        enabled = enabled,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = TimerControlShape,
+                        border = BorderStroke(1.dp, GraycieBorder),
+                    ) {
+                        Text("Reset all to Immediate")
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Clears all app time overrides.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = GraycieMuted,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                if (defaultMinutes != null) {
+                    TextButton(onClick = { onSelected(null) }, enabled = enabled) {
+                        Text("Use global (${timerLabel(defaultMinutes)})")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSelected(hours * 60 + remainingMinutes) }, enabled = enabled) {
+                Text("Set")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun DurationWheel(
+    label: String,
+    selected: Int,
+    maximum: Int,
+    modifier: Modifier,
+    changed: (Int) -> Unit,
+) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        AndroidView(
+            modifier = Modifier.fillMaxWidth().height(160.dp),
+            factory = { context ->
+                NumberPicker(ContextThemeWrapper(context, R.style.Theme_Graycie)).apply {
+                    minValue = 0
+                    descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                    contentDescription = label
+                    if (Build.VERSION.SDK_INT >= 29) textColor = GraycieText.toArgb()
+                }
+            },
+            update = { picker ->
+                picker.maxValue = maximum
+                picker.isEnabled = maximum > 0
+                picker.wrapSelectorWheel = false
+                picker.value = selected
+                picker.setOnValueChangedListener { _, _, value -> changed(value) }
+            },
+        )
+    }
+}
+
+private fun timerLabel(minutes: Int) = if (minutes == 0) "Immediate" else "$minutes min"
+private fun timerChipLabel(minutes: Int) = if (minutes == 0) "Now" else "${minutes}m"
+
+@Composable
 private fun SearchField(query: String, setQuery: (String) -> Unit) {
     OutlinedTextField(
         value = query,
@@ -941,6 +1199,11 @@ private fun AppRow(
     manager: ManagerSnapshot,
     snoozeMode: Boolean,
     busy: Boolean,
+    timerVisible: Boolean,
+    timerMinutes: Int,
+    timerOverridden: Boolean,
+    defaultTimerMinutes: Int,
+    setTimer: (Int?) -> Unit,
     toggle: (Boolean) -> Unit,
     openSafely: (String) -> Unit,
 ) {
@@ -994,6 +1257,18 @@ private fun AppRow(
             Text(app.label, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = GraycieMuted)
         }
+        if (timerVisible) {
+            TimerPicker(
+                label = timerChipLabel(timerMinutes),
+                selected = timerMinutes,
+                defaultMinutes = defaultTimerMinutes,
+                enabled = !busy,
+                highlight = timerOverridden,
+                onSelected = setTimer,
+                testTag = "app-timer:${app.packageName}",
+                description = "Grayscale delay for ${app.label}",
+            )
+        }
         if (snoozeMode && checked) {
             IconButton(
                 onClick = { openSafely(app.packageName) },
@@ -1040,6 +1315,7 @@ private fun SetupScreen(
     onCopy: () -> Unit,
     onRefresh: () -> Unit,
     onOpenAccessibility: () -> Unit,
+    onOpenUsageAccess: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().widthIn(max = 720.dp).testTag("setup-screen"),
@@ -1049,7 +1325,7 @@ private fun SetupScreen(
         item("intro") {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                 Text(
-                    "Both permissions stay under your control and can be removed at any time.",
+                    "Manage Graycie’s permissions here. Usage Access is needed only for timed grayscale.",
                     color = GraycieMuted,
                 )
             }
@@ -1140,6 +1416,23 @@ private fun SetupScreen(
                 }
             }
         }
+        item("usage-access") {
+            SetupStep(
+                number = "03",
+                title = "Allow Usage Access",
+                ready = manager.usageAccessGranted,
+                optional = true,
+            ) {
+                Text(
+                    "Optional: needed only for daily app time limits. Immediate grayscale works without it. Android usage history stays on your device.",
+                    color = GraycieMuted,
+                )
+                Spacer(Modifier.height(14.dp))
+                GraycieButton(onClick = onOpenUsageAccess, modifier = Modifier.testTag("open-usage-access")) {
+                    Text("Open Usage Access")
+                }
+            }
+        }
         item("privacy") {
             Column(
                 Modifier.padding(horizontal = 16.dp, vertical = 12.dp).fillMaxWidth()
@@ -1176,6 +1469,7 @@ private fun SetupStep(
     number: String,
     title: String,
     ready: Boolean,
+    optional: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     Column(
@@ -1193,7 +1487,7 @@ private fun SetupStep(
                 ).padding(horizontal = 9.dp, vertical = 5.dp),
             ) {
                 Text(
-                    if (ready) "Ready" else "Needed",
+                    if (ready) "Ready" else if (optional) "Optional" else "Needed",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (ready) Color(0xFFB9E3BB) else GraycieMuted,
                 )

@@ -1,8 +1,15 @@
 package now.abhi.graycie
 
+import android.os.SystemClock
+import java.time.ZoneId
+
 enum class Policy { ONLY_SELECTED, EXCEPT_SELECTED }
 
 private const val PERMISSION_ERROR = "Secure settings permission is missing. Complete the ADB setup."
+private const val USAGE_UNAVAILABLE_ERROR =
+    "Android usage history is unavailable. Check Usage Access and try again."
+internal const val USAGE_ACCESS_ERROR =
+    "Usage Access is required for delayed grayscale. Open Setup to grant it."
 
 data class ManagerState(
     val managerEnabled: Boolean = false,
@@ -14,6 +21,9 @@ data class ManagerState(
     val snoozePackages: Set<String> = emptySet(),
     val snoozedForPackage: String? = null,
     val ownsColorCorrection: Boolean = false,
+    val defaultGrayAfterMinutes: Int = DEFAULT_GRAY_AFTER_MINUTES,
+    val grayAfterMinutes: Map<String, Int> = emptyMap(),
+    val usageError: String? = null,
 )
 
 /** A configured app can trigger an automatic snooze only while none is pending. */
@@ -40,10 +50,18 @@ class PolicyEngine(
     private val settings: GrayscaleSettings,
     private val serviceEnabled: () -> Boolean,
     private val changed: () -> Unit = {},
+    private val scheduler: UsageCheckScheduler = NoOpUsageCheckScheduler,
+    private val usageSampler: UsageSampler = UnavailableUsageSampler,
+    private val usageAccess: () -> Boolean = { true },
+    private val nowWallMillis: () -> Long = { System.currentTimeMillis() },
+    private val nowElapsedMillis: () -> Long = { SystemClock.elapsedRealtime() },
+    private val zone: () -> ZoneId = { ZoneId.systemDefault() },
 ) {
     var state = store.read()
         private set
     private var foregroundTarget: ForegroundTarget? = null
+    private var screenOn = true
+    private var evaluationGeneration = 0L
 
     private fun save(next: ManagerState) {
         if (next == state) return
@@ -54,6 +72,7 @@ class PolicyEngine(
 
     fun checkPrerequisites() {
         if (!settings.hasPermission()) {
+            cancelEvaluation()
             save(state.copy(managerEnabled = state.managerEnabled && state.snoozedForPackage != null,
                 lastAppliedGrayscale = null,
                 error = PERMISSION_ERROR))
@@ -64,8 +83,14 @@ class PolicyEngine(
         }
     }
 
+    fun refreshPrerequisites() {
+        checkPrerequisites()
+        evaluate()
+    }
+
     fun setEnabled(enabled: Boolean) {
         if (!enabled) {
+            cancelEvaluation()
             save(state.copy(managerEnabled = false, snoozedForPackage = null))
             releaseGrayscale()
             return
@@ -89,6 +114,22 @@ class PolicyEngine(
         evaluate()
     }
 
+    fun setDefaultGrayAfterMinutes(minutes: Int, clearOverrides: Boolean = false) {
+        save(state.copy(
+            defaultGrayAfterMinutes = minutes.coerceIn(0, MAX_GRAY_AFTER_MINUTES),
+            grayAfterMinutes = if (clearOverrides) emptyMap() else state.grayAfterMinutes,
+        ))
+        evaluate()
+    }
+
+    fun setGrayAfterMinutes(packages: Map<String, Int>) {
+        val sanitized = packages
+            .filterKeys { it.isNotBlank() }
+            .mapValues { (_, minutes) -> minutes.coerceIn(0, MAX_GRAY_AFTER_MINUTES) }
+        save(state.copy(grayAfterMinutes = sanitized))
+        evaluate()
+    }
+
     fun setSnoozePackages(packages: Set<String>) {
         save(state.copy(snoozePackages = packages - ownPackage))
     }
@@ -97,6 +138,7 @@ class PolicyEngine(
         if (state.snoozedForPackage != null || packageName !in state.snoozePackages) {
             return false
         }
+        cancelEvaluation()
         save(state.copy(snoozedForPackage = packageName, error = null))
         return true
     }
@@ -126,6 +168,8 @@ class PolicyEngine(
 
     fun abortSnooze(message: String) {
         save(state.copy(snoozedForPackage = null, error = message))
+        evaluate()
+        if (state.error == null) reportError(message)
     }
 
     fun reportError(message: String) = save(state.copy(error = message))
@@ -136,6 +180,8 @@ class PolicyEngine(
     }
 
     fun onConnected() {
+        cancelEvaluation()
+        screenOn = true
         // Persisted foreground and applied state cannot be trusted after reconnect/restart.
         foregroundTarget = null
         save(state.copy(lastRecognisedPackage = null, lastAppliedGrayscale = null))
@@ -167,7 +213,14 @@ class PolicyEngine(
         evaluate()
     }
 
+    /** Keep current color, drop the deadline, and resample when the app is confirmed again. */
+    fun onForegroundUncertain() {
+        cancelEvaluation()
+        foregroundTarget = null
+    }
+
     fun onDisconnected() {
+        cancelEvaluation()
         foregroundTarget = null
         if (state.snoozedForPackage != null) {
             save(state.copy(lastRecognisedPackage = null))
@@ -177,23 +230,135 @@ class PolicyEngine(
         releaseGrayscale()
     }
 
-    private fun evaluate() {
-        if (!state.managerEnabled) return
-        val grayscale = when (val target = foregroundTarget) {
-            is ForegroundTarget.Home -> true
-            is ForegroundTarget.App -> {
-                val selected = target.packageName in state.selectedPackages
-                target.packageName != ownPackage && when (state.policy) {
-                    Policy.ONLY_SELECTED -> selected
-                    Policy.EXCEPT_SELECTED -> !selected
-                }
-            }
-            null -> return
-        }
-        applyGrayscale(grayscale)
+    /** Cancel the pending deadline until the device is unlocked; keep the current color state. */
+    fun onScreenOff() {
+        screenOn = false
+        cancelEvaluation()
     }
 
-    private fun applyGrayscale(enabled: Boolean) {
+    /** Read Android usage fresh on unlock. */
+    fun onUserPresent() {
+        screenOn = true
+        if (state.managerEnabled && state.snoozedForPackage == null) evaluate()
+    }
+
+    /** Clock, timezone, or date changes replace the deadline with a fresh sample. */
+    fun onTimeChanged() {
+        if (state.managerEnabled && state.snoozedForPackage == null) evaluate()
+    }
+
+    private fun evaluate(allowRetry: Boolean = true) {
+        cancelEvaluation()
+        if (!state.managerEnabled || state.snoozedForPackage != null || !screenOn) return
+        if (usageAccess() && state.usageError == USAGE_ACCESS_ERROR) {
+            setUsageError(null)
+        }
+        val target = foregroundTarget ?: return
+        if (target is ForegroundTarget.Home) {
+            applyGrayscale(true)
+            return
+        }
+        val packageName = (target as ForegroundTarget.App).packageName
+        val selected = packageName in state.selectedPackages
+        val grayscale = packageName != ownPackage && when (state.policy) {
+            Policy.ONLY_SELECTED -> selected
+            Policy.EXCEPT_SELECTED -> !selected
+        }
+        if (!grayscale) {
+            applyGrayscale(false)
+            return
+        }
+        val minutes = state.grayAfterMinutes[packageName] ?: state.defaultGrayAfterMinutes
+        val allowanceSeconds = minutes.coerceAtLeast(0) * 60L
+        if (allowanceSeconds <= 0L) {
+            applyGrayscale(true)
+            return
+        }
+        if (!usageAccess()) {
+            setUsageError(USAGE_ACCESS_ERROR)
+            applyGrayscale(false)
+            return
+        }
+        val generation = evaluationGeneration
+        usageSampler.sample(packageName) { sample ->
+            onSample(generation, packageName, allowanceSeconds, sample, allowRetry)
+        }
+    }
+
+    private fun onSample(
+        generation: Long,
+        packageName: String,
+        allowanceSeconds: Long,
+        sample: UsageSample,
+        allowRetry: Boolean,
+    ) {
+        if (generation != evaluationGeneration || !isActive(packageName)) return
+        when (sample) {
+            UsageSample.Unavailable -> {
+                setUsageError(USAGE_UNAVAILABLE_ERROR)
+                applyGrayscale(false, clearError = false)
+                if (allowRetry) scheduleRetry(generation, packageName)
+            }
+            is UsageSample.Available -> {
+                if (sample.dayStartMillis != startOfTodayMillis(nowWallMillis(), zone())) {
+                    // The local day changed while the query was in flight; sample again.
+                    evaluate()
+                    return
+                }
+                setUsageError(null)
+                val remainingSeconds = allowanceSeconds - sample.usedSeconds
+                val deadlineElapsedMillis = sample.sampledAtElapsedMillis +
+                    (remainingSeconds - USAGE_EXHAUSTED_MARGIN_SECONDS) * 1_000L
+                val delayMillis = deadlineElapsedMillis - nowElapsedMillis()
+                if (remainingSeconds <= USAGE_EXHAUSTED_MARGIN_SECONDS || delayMillis <= 0L) {
+                    applyGrayscale(true, clearError = false)
+                    return
+                }
+                applyGrayscale(false, clearError = false)
+                if (generation != evaluationGeneration || !isActive(packageName)) return
+                scheduler.schedule(delayMillis) {
+                    onDeadline(generation, packageName, sample.dayStartMillis)
+                }
+            }
+        }
+    }
+
+    private fun scheduleRetry(generation: Long, packageName: String) {
+        if (generation != evaluationGeneration || !isActive(packageName)) return
+        scheduler.schedule(USAGE_RETRY_DELAY_MILLIS) {
+            if (generation == evaluationGeneration) evaluate(allowRetry = false)
+        }
+    }
+
+    private fun onDeadline(
+        generation: Long,
+        packageName: String,
+        sampledDayStartMillis: Long,
+    ) {
+        if (generation != evaluationGeneration || !isActive(packageName)) return
+        if (sampledDayStartMillis != startOfTodayMillis(nowWallMillis(), zone())) {
+            // The local day changed before the deadline; the new day needs a fresh sample.
+            evaluate()
+            return
+        }
+        applyGrayscale(true, clearError = false)
+    }
+
+    private fun isActive(packageName: String): Boolean =
+        state.managerEnabled && state.snoozedForPackage == null && screenOn &&
+            foregroundTarget == ForegroundTarget.App(packageName)
+
+    private fun setUsageError(message: String?) {
+        if (state.usageError == message) return
+        save(state.copy(usageError = message))
+    }
+
+    private fun cancelEvaluation() {
+        evaluationGeneration++
+        scheduler.cancel()
+    }
+
+    private fun applyGrayscale(enabled: Boolean, clearError: Boolean = true) {
         if (state.lastAppliedGrayscale == enabled) return
         try {
             if (!settings.hasPermission()) throw SecurityException("Permission missing")
@@ -204,7 +369,7 @@ class PolicyEngine(
                 failChange("Android refused the color correction change. Check setup and try again.")
                 return
             }
-            save(state.copy(lastAppliedGrayscale = enabled, error = null))
+            save(state.copy(lastAppliedGrayscale = enabled, error = if (clearError) null else state.error))
         } catch (_: SecurityException) {
             failChange(PERMISSION_ERROR)
         } catch (_: RuntimeException) {
@@ -231,6 +396,7 @@ class PolicyEngine(
     }
 
     private fun failChange(message: String, cleanup: Boolean = true) {
+        cancelEvaluation()
         var error = message
         var ownsColorCorrection = state.ownsColorCorrection
         if (cleanup && ownsColorCorrection && settings.hasPermission()) {

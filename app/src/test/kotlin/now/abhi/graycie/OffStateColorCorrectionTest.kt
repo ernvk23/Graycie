@@ -5,7 +5,7 @@ import org.junit.Test
 
 class OffStateColorCorrectionTest {
     private class Store : StateStore {
-        var state = ManagerState()
+        var state = ManagerState(defaultGrayAfterMinutes = 0)
         override fun read() = state
         override fun write(state: ManagerState) { this.state = state }
     }

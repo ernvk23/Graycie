@@ -64,15 +64,23 @@ class ManagerViewModelTest {
         assertFalse(viewModel.uiState.value.loadingApps)
     }
 
-    @Test fun selectedAppsArePinnedAboveTheCatalogOrder() = runTest(dispatcher) {
+    @Test fun selectedAppsStayFirstWithCustomTimesFirstWithinEachGroup() = runTest(dispatcher) {
         val viewModel = ManagerViewModel(source, {
-            listOf(app("Alpha", "alpha"), app("Beta", "beta"), app("Gamma", "gamma"))
+            listOf("Alpha", "Beta", "Delta", "Epsilon", "Gamma", "Zeta").map {
+                app(it, it.lowercase())
+            }
         }, dispatcher)
         viewModel.loadApps()
         advanceUntilIdle()
         assertEquals(
-            listOf("gamma", "alpha", "beta"),
+            listOf("gamma", "alpha", "beta", "delta", "epsilon", "zeta"),
             viewModel.uiState.value.visibleApps(setOf("gamma")).map { it.packageName },
+        )
+        assertEquals(
+            listOf("beta", "alpha", "gamma", "delta", "epsilon", "zeta"),
+            viewModel.uiState.value.visibleApps(
+                setOf("alpha", "beta", "gamma"), setOf("beta", "delta"),
+            ).map { it.packageName },
         )
     }
 
@@ -116,6 +124,21 @@ class ManagerViewModelTest {
         assertFalse(viewModel.uiState.value.loadingApps)
     }
 
+    @Test fun timerChangesReachController() = runTest(dispatcher) {
+        val viewModel = ManagerViewModel(source, { emptyList() }, dispatcher)
+        advanceUntilIdle()
+        viewModel.setDefaultGrayAfterMinutes(5)
+        viewModel.setGrayAfterMinutes("browser", 15)
+        assertEquals(5, source.snapshots.value.defaultGrayAfterMinutes)
+        assertEquals(mapOf("browser" to 15), source.snapshots.value.grayAfterMinutes)
+        viewModel.setGrayAfterMinutes("browser", null)
+        assertTrue(source.snapshots.value.grayAfterMinutes.isEmpty())
+        viewModel.setGrayAfterMinutes("browser", 30)
+        viewModel.resetAllGrayAfterMinutes()
+        assertEquals(0, source.snapshots.value.defaultGrayAfterMinutes)
+        assertTrue(source.snapshots.value.grayAfterMinutes.isEmpty())
+    }
+
     private fun app(label: String, packageName: String) = InstalledApp(packageName, label, null, false)
 
     private class FakeSource : ManagerStateSource {
@@ -128,6 +151,13 @@ class ManagerViewModelTest {
         override fun setPolicy(policy: Policy) = change { it.copy(policy = policy) }
         override fun setSelectedPackages(packages: Set<String>) = change { it.copy(selectedPackages = packages) }
         override fun setSnoozePackages(packages: Set<String>) = change { it.copy(snoozePackages = packages) }
+        override fun setDefaultGrayAfterMinutes(minutes: Int, clearOverrides: Boolean) =
+            change { it.copy(
+                defaultGrayAfterMinutes = minutes,
+                grayAfterMinutes = if (clearOverrides) emptyMap() else it.grayAfterMinutes,
+            ) }
+        override fun setGrayAfterMinutes(packages: Map<String, Int>) =
+            change { it.copy(grayAfterMinutes = packages) }
         override fun openSafely(packageName: String) { safeLaunch = packageName }
         override fun resumeFromSnooze() { resumes++ }
         override fun refreshPrerequisites() { refreshes++ }

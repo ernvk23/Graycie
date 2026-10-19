@@ -18,6 +18,13 @@ class ForegroundWindowClassifierTest {
         assertEquals("app.one", (result as ForegroundClassification.Settled).packageName)
     }
 
+    @Test fun focusedOwnWindowIsAuthoritative() {
+        val own = "now.abhi.graycie"
+        assertTrue(classifier.isOwnWindowFocused(listOf(app(own)), own))
+        assertFalse(classifier.isOwnWindowFocused(listOf(app(own, focused = false)), own))
+        assertFalse(classifier.isOwnWindowFocused(listOf(app(own, pip = true)), own))
+    }
+
     @Test fun homeIsAStableDestination() {
         assertTrue(classifier.classify(listOf(app("launcher")), apps, homes) is ForegroundClassification.HomeOverview)
     }

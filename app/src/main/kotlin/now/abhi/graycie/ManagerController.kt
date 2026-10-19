@@ -16,6 +16,7 @@ import android.view.accessibility.AccessibilityManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.time.ZoneId
 
 data class ManagerSnapshot(
     val applicationId: String,
@@ -31,6 +32,10 @@ data class ManagerSnapshot(
     val snoozedForPackage: String? = null,
     val status: ManagerStatus = ManagerStatus.DISABLED,
     val notificationReady: Boolean = false,
+    val defaultGrayAfterMinutes: Int = DEFAULT_GRAY_AFTER_MINUTES,
+    val grayAfterMinutes: Map<String, Int> = emptyMap(),
+    val usageAccessGranted: Boolean = false,
+    val usageError: String? = null,
 ) {
     val ready: Boolean get() = permissionGranted && serviceEnabled
     val adbCommand: String
@@ -43,6 +48,8 @@ interface ManagerStateSource {
     fun setPolicy(policy: Policy)
     fun setSelectedPackages(packages: Set<String>)
     fun setSnoozePackages(packages: Set<String>) = Unit
+    fun setDefaultGrayAfterMinutes(minutes: Int, clearOverrides: Boolean = false) = Unit
+    fun setGrayAfterMinutes(packages: Map<String, Int>) = Unit
     fun openSafely(packageName: String) = Unit
     fun resumeFromSnooze() = Unit
     fun refreshPrerequisites()
@@ -50,6 +57,8 @@ interface ManagerStateSource {
 
 class ManagerController private constructor(private val context: Context) : ManagerStateSource {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+    private val usageHistory = AndroidUsageHistory(context)
+    private var usageAccessGranted = usageHistory.isGranted()
     private val _snapshots = MutableStateFlow(emptySnapshot(context.packageName))
     override val snapshots: StateFlow<ManagerSnapshot> = _snapshots.asStateFlow()
 
@@ -95,6 +104,12 @@ class ManagerController private constructor(private val context: Context) : Mana
             // application is enough evidence to retain cleanup responsibility.
             ownsColorCorrection = preferences.getBoolean("ownsColorCorrection",
                 preferences.getBoolean("lastAppliedGrayscale", false)),
+            defaultGrayAfterMinutes = preferences.getInt(
+                "defaultGrayAfterMinutes", DEFAULT_GRAY_AFTER_MINUTES
+            ),
+            grayAfterMinutes = parseGrayAfter(
+                preferences.getStringSet("grayAfterMinutes", emptySet())!!.toSet()
+            ),
         )
 
         override fun write(state: ManagerState) {
@@ -109,6 +124,10 @@ class ManagerController private constructor(private val context: Context) : Mana
                 putString("snoozedForPackage", state.snoozedForPackage)
                 putString("lastRecognisedPackage", state.lastRecognisedPackage)
                 putString("error", state.error)
+                putInt("defaultGrayAfterMinutes", state.defaultGrayAfterMinutes)
+                putStringSet("grayAfterMinutes", state.grayAfterMinutes.map { (packageName, minutes) ->
+                    "$packageName=$minutes"
+                }.toSet())
                 state.lastAppliedGrayscale?.let { putBoolean("lastAppliedGrayscale", it) }
                     ?: remove("lastAppliedGrayscale")
             }.let { editor ->
@@ -116,7 +135,13 @@ class ManagerController private constructor(private val context: Context) : Mana
                 if (ownershipChanged) editor.commit() else editor.apply()
             }
         }
-    }, settings, ::isServiceEnabled, ::publishState)
+    }, settings, ::isServiceEnabled, ::publishState,
+        scheduler = HandlerUsageCheckScheduler(handler),
+        usageSampler = usageHistory,
+        usageAccess = { usageAccessGranted },
+        nowWallMillis = { System.currentTimeMillis() },
+        zone = { ZoneId.systemDefault() },
+    )
 
     private val snooze = SnoozeCoordinator(
         engine = engine,
@@ -161,6 +186,16 @@ class ManagerController private constructor(private val context: Context) : Mana
         publishState()
     }
 
+    override fun setDefaultGrayAfterMinutes(minutes: Int, clearOverrides: Boolean) = onMain {
+        engine.setDefaultGrayAfterMinutes(minutes, clearOverrides)
+        publishState()
+    }
+
+    override fun setGrayAfterMinutes(packages: Map<String, Int>) = onMain {
+        engine.setGrayAfterMinutes(packages - activeHomePackages() - context.packageName)
+        publishState()
+    }
+
     override fun openSafely(packageName: String) = onMain {
         engine.checkPrerequisites()
         snooze.openSafely(packageName)
@@ -191,6 +226,7 @@ class ManagerController private constructor(private val context: Context) : Mana
     fun onServiceConnected() {
         handler.removeCallbacksAndMessages(RESUME_TOKEN)
         snooze.onServiceConnected()
+        refreshUsageAccess()
         engine.onConnected()
         publishState()
     }
@@ -206,10 +242,14 @@ class ManagerController private constructor(private val context: Context) : Mana
     }
 
     override fun refreshPrerequisites() = onMain {
-        engine.checkPrerequisites()
+        refreshUsageAccess()
+        engine.refreshPrerequisites()
         publishState()
     }
 
+    fun refreshUsageAccess() {
+        usageAccessGranted = usageHistory.isGranted()
+    }
     fun publishState() {
         check(Looper.myLooper() == Looper.getMainLooper()) { "Controller state must be published on main" }
         val state = engine.state
@@ -234,6 +274,10 @@ class ManagerController private constructor(private val context: Context) : Mana
             lastRecognisedPackage = state.lastRecognisedPackage,
             lastAppliedGrayscale = state.lastAppliedGrayscale,
             error = state.error,
+            defaultGrayAfterMinutes = state.defaultGrayAfterMinutes,
+            grayAfterMinutes = state.grayAfterMinutes - home - context.packageName,
+            usageAccessGranted = usageAccessGranted,
+            usageError = state.usageError,
         )
     }
 
@@ -275,6 +319,14 @@ class ManagerController private constructor(private val context: Context) : Mana
 
         private val RESUME_TOKEN = Any()
         private const val RESUME_TIMEOUT_MS = 8_000L
+
+        private fun parseGrayAfter(values: Set<String>): Map<String, Int> =
+            values.mapNotNull { entry ->
+                val packageName = entry.substringBeforeLast('=', "")
+                val minutes = entry.substringAfterLast('=', "").toIntOrNull()
+                if (packageName.isBlank() || minutes == null || minutes < 0) null
+                else packageName to minutes.coerceAtMost(MAX_GRAY_AFTER_MINUTES)
+            }.toMap()
 
         fun get(context: Context): ManagerController = instance ?: synchronized(this) {
             instance ?: ManagerController(context.applicationContext).also { instance = it }

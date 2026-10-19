@@ -19,6 +19,9 @@ sealed interface ForegroundClassification {
 }
 
 class ForegroundWindowClassifier {
+    fun isOwnWindowFocused(windows: List<WindowMetadata>, ownPackage: String): Boolean =
+        windows.any { it.focused && it.packageName == ownPackage && !it.pictureInPicture }
+
     fun classify(
         windows: List<WindowMetadata>,
         launchablePackages: Set<String>,

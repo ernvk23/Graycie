@@ -1,10 +1,14 @@
 package now.abhi.graycie
 
+import java.time.Instant
+import java.time.ZoneId
 import org.junit.Assert.*
 import org.junit.Test
 
 class PolicyEngineTest {
-    private class Store(var saved: ManagerState = ManagerState()) : StateStore {
+    private class Store(
+        var saved: ManagerState = ManagerState(defaultGrayAfterMinutes = 0),
+    ) : StateStore {
         override fun read() = saved
         override fun write(state: ManagerState) { saved = state }
     }
@@ -35,9 +39,74 @@ class PolicyEngineTest {
     private val store = Store()
     private val settings = Settings()
     private var serviceEnabled = true
+
+    private class Scheduler : UsageCheckScheduler {
+        var action: (() -> Unit)? = null
+        var delayMillis: Long? = null
+        override fun schedule(delayMillis: Long, action: () -> Unit) {
+            this.delayMillis = delayMillis
+            this.action = action
+        }
+        override fun cancel() {
+            action = null
+            delayMillis = null
+        }
+        fun fire() {
+            val next = action ?: error("No usage check scheduled")
+            action = null
+            delayMillis = null
+            next()
+        }
+    }
+
+    private inner class UsageSamplerFake : UsageSampler {
+        var provider: (String) -> UsageSample = { sample(0L) }
+        var autoRespond = true
+        var calls = 0
+        val pending = mutableListOf<Pair<String, (UsageSample) -> Unit>>()
+
+        override fun sample(packageName: String, onResult: (UsageSample) -> Unit) {
+            calls++
+            if (autoRespond) onResult(provider(packageName))
+            else pending += packageName to onResult
+        }
+    }
+
+    private var wallMillis = Instant.parse("2026-10-18T00:00:00Z").toEpochMilli()
+    private var elapsedMillis = 1_000_000L
+    private var zone: ZoneId = ZoneId.of("UTC")
+    private var usageAccess = true
+    private val scheduler = Scheduler()
+    private val sampler = UsageSamplerFake()
+
+    private fun sample(usedSeconds: Long) = UsageSample.Available(
+        usedSeconds = usedSeconds,
+        dayStartMillis = startOfTodayMillis(wallMillis, zone),
+        sampledAtElapsedMillis = elapsedMillis,
+    )
+
     private fun engine() = PolicyEngine("manager", store, settings, { serviceEnabled })
     private val engine = engine()
-    private fun start(policy: Policy = Policy.ONLY_SELECTED) {
+
+    private fun timedEngine(defaultMinutes: Int = 10): PolicyEngine {
+        store.saved = ManagerState(defaultGrayAfterMinutes = defaultMinutes)
+        return PolicyEngine(
+            ownPackage = "manager",
+            store = store,
+            settings = settings,
+            serviceEnabled = { serviceEnabled },
+            scheduler = scheduler,
+            usageSampler = sampler,
+            usageAccess = { usageAccess },
+            nowWallMillis = { wallMillis },
+            nowElapsedMillis = { elapsedMillis },
+            zone = { zone },
+        )
+    }
+
+    private fun start(policy: Policy = Policy.ONLY_SELECTED) = start(engine, policy)
+
+    private fun start(engine: PolicyEngine, policy: Policy = Policy.ONLY_SELECTED) {
         engine.setSelected(setOf("selected", "also.selected"))
         engine.setPolicy(policy)
         engine.setEnabled(true)
@@ -319,6 +388,461 @@ class PolicyEngineTest {
         assertFalse(engine.state.managerEnabled)
         assertNull(engine.state.lastAppliedGrayscale)
         assertTrue(engine.state.error!!.contains("permission"))
+    }
+
+    @Test fun oneEntrySampleTurnsAContinuouslyOpenAppGrayAtItsDeadline() {
+        sampler.provider = { sample(60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(false), settings.writes)
+        assertEquals(1, sampler.calls)
+        assertEquals(510_000L, scheduler.delayMillis)
+
+        elapsedMillis += scheduler.delayMillis!!
+        wallMillis += scheduler.delayMillis!!
+        scheduler.fire()
+        assertEquals(listOf(false, true), settings.writes)
+        assertEquals(1, sampler.calls)
+        assertNull(scheduler.action)
+    }
+
+    @Test fun queryDeliveryDelayIsIncludedInTheDeadline() {
+        sampler.provider = { sample(60).also { elapsedMillis += 10_000L } }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(1, sampler.calls)
+        assertEquals(500_000L, scheduler.delayMillis)
+        assertEquals(listOf(false), settings.writes)
+    }
+
+    @Test fun lastThirtySecondsAreTreatedAsExhaustedOnEntry() {
+        sampler.provider = { sample(570) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(true), settings.writes)
+        assertEquals(1, sampler.calls)
+        assertNull(scheduler.action)
+    }
+
+    @Test fun thirtyOneSecondsRemainingSchedulesTheFinalSecond() {
+        sampler.provider = { sample(569) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(false), settings.writes)
+        assertEquals(1_000L, scheduler.delayMillis)
+
+        elapsedMillis += 1_000L
+        scheduler.fire()
+        assertEquals(listOf(false, true), settings.writes)
+        assertEquals(1, sampler.calls)
+    }
+
+    @Test fun unavailableUsageRetriesOnceThenRecoversOnLifecycleChange() {
+        sampler.provider = { UsageSample.Unavailable }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(timed.state.usageError)
+        assertEquals(listOf(false), settings.writes)
+        assertTrue(timed.state.managerEnabled)
+        assertEquals(USAGE_RETRY_DELAY_MILLIS, scheduler.delayMillis)
+
+        scheduler.fire()
+        assertEquals(2, sampler.calls)
+        assertNull(scheduler.action)
+        assertNotNull(timed.state.usageError)
+
+        sampler.provider = { sample(0) }
+        timed.onTimeChanged()
+        assertNull(timed.state.usageError)
+        assertEquals(3, sampler.calls)
+        assertEquals(listOf(false), settings.writes)
+        assertEquals(570_000L, scheduler.delayMillis)
+    }
+
+    @Test fun uncertainForegroundCancelsTheUsageRetry() {
+        sampler.provider = { UsageSample.Unavailable }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(scheduler.action)
+
+        timed.onForegroundUncertain()
+        assertNull(scheduler.action)
+        assertEquals(1, sampler.calls)
+    }
+
+    @Test fun noConfiguredDelayGreysImmediately() {
+        val timed = timedEngine(defaultMinutes = 0)
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(true), settings.writes)
+        assertEquals(0, sampler.calls)
+        assertNull(scheduler.action)
+    }
+
+    @Test fun perAppOverrideReplacesTheGlobalDelay() {
+        val timed = timedEngine()
+        start(timed)
+        timed.setGrayAfterMinutes(mapOf("selected" to 0))
+        timed.onForeground("selected", true)
+        assertEquals(listOf(true), settings.writes)
+        assertEquals(0, sampler.calls)
+        assertNull(scheduler.action)
+    }
+
+    @Test fun resettingAllTimesAppliesImmediatelyAndLetsEveryAppInheritAgain() {
+        val timed = timedEngine()
+        start(timed)
+        val overrides = mapOf("selected" to 15, "also.selected" to 30)
+        timed.setGrayAfterMinutes(overrides)
+        timed.onForeground("selected", true)
+        timed.setDefaultGrayAfterMinutes(5)
+        assertEquals(overrides, timed.state.grayAfterMinutes)
+        assertNotNull(scheduler.action)
+        val queriesBeforeReset = sampler.calls
+
+        timed.setDefaultGrayAfterMinutes(0, clearOverrides = true)
+        assertEquals(0, timed.state.defaultGrayAfterMinutes)
+        assertTrue(store.saved.grayAfterMinutes.isEmpty())
+        assertEquals(setOf("selected", "also.selected"), timed.state.selectedPackages)
+        assertEquals(true, settings.writes.last())
+        assertNull(scheduler.action)
+        assertEquals(queriesBeforeReset, sampler.calls)
+
+        timed.setDefaultGrayAfterMinutes(20)
+        assertEquals(false, settings.writes.last())
+        assertNotNull(scheduler.action)
+    }
+
+    @Test fun exceptSelectedChecksUnselectedAppsOnly() {
+        val timed = timedEngine()
+        start(timed, Policy.EXCEPT_SELECTED)
+        timed.onForeground("other", true)
+        assertEquals(listOf(false), settings.writes)
+        assertNotNull(scheduler.action)
+
+        timed.onForeground("selected", true)
+        assertEquals(listOf(false), settings.writes)
+        assertNull(scheduler.action)
+        assertEquals(1, sampler.calls)
+    }
+
+    @Test fun twoAppsHaveIndependentAllowances() {
+        sampler.provider = { packageName ->
+            val used = if (packageName == "selected") 9 * 60L else 10 * 60L
+            sample(used)
+        }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(scheduler.action)
+        timed.onForeground("also.selected", true)
+        assertEquals(listOf(false, true), settings.writes)
+        assertEquals(2, sampler.calls)
+    }
+
+    @Test fun slowQueryForPreviousAppIsDiscarded() {
+        sampler.autoRespond = false
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        timed.onForeground("other", true)
+        assertEquals(listOf(false), settings.writes)
+
+        val (_, callback) = sampler.pending.single()
+        callback(sample(11 * 60))
+        assertEquals(listOf(false), settings.writes)
+    }
+
+    @Test fun canceledDeadlineCannotReplaceTheNewAppsQuery() {
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        val canceledCheck = scheduler.action!!
+
+        sampler.autoRespond = false
+        timed.onForeground("also.selected", true)
+        canceledCheck()
+        assertEquals(2, sampler.calls)
+        val (packageName, callback) = sampler.pending.single()
+        assertEquals("also.selected", packageName)
+        callback(sample(10 * 60))
+        assertEquals(listOf(false, true), settings.writes)
+        assertNull(scheduler.action)
+    }
+
+    @Test fun screenOffStopsWorkAndUnlockUsesAFreshSample() {
+        sampler.provider = { sample(4 * 60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(scheduler.action)
+
+        timed.onScreenOff()
+        assertNull(scheduler.action)
+        val callsBeforeLock = sampler.calls
+
+        wallMillis += 60 * 60_000L
+        timed.onForeground("other", true)
+        timed.onForeground("selected", true)
+        assertEquals(callsBeforeLock, sampler.calls)
+        assertNull(scheduler.action)
+
+        sampler.provider = { sample(4 * 60) }
+        timed.onUserPresent()
+        assertEquals(callsBeforeLock + 1, sampler.calls)
+        assertNotNull(scheduler.action)
+        assertEquals(listOf(false), settings.writes)
+    }
+
+    @Test fun uncertainForegroundSuspendsDeadlineAndReturningToSameAppResamples() {
+        sampler.provider = { sample(4 * 60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(1, sampler.calls)
+        assertEquals(330_000L, scheduler.delayMillis)
+
+        timed.onForegroundUncertain()
+        assertNull(scheduler.action)
+        assertEquals(1, sampler.calls)
+        assertEquals(listOf(false), settings.writes)
+
+        timed.onForeground("selected", true)
+        assertEquals(2, sampler.calls)
+        assertEquals(330_000L, scheduler.delayMillis)
+        assertEquals(listOf(false), settings.writes)
+    }
+
+    @Test fun queryFailureRecoversWhenPrerequisitesAreRefreshed() {
+        sampler.provider = { UsageSample.Unavailable }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(timed.state.usageError)
+
+        sampler.provider = { sample(9 * 60) }
+        timed.refreshPrerequisites()
+        assertNull(timed.state.usageError)
+        assertNotNull(scheduler.action)
+    }
+
+    @Test fun snoozeCancelsTheDeadline() {
+        val timed = timedEngine()
+        timed.setSnoozePackages(setOf("bank"))
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(scheduler.action)
+
+        assertTrue(timed.prepareSnooze("bank"))
+        assertNull(scheduler.action)
+    }
+
+    @Test fun abortedSnoozeRestoresTheDeadline() {
+        sampler.provider = { sample(9 * 60) }
+        val timed = timedEngine()
+        timed.setSnoozePackages(setOf("bank"))
+        start(timed)
+        timed.onForeground("selected", true)
+        assertTrue(timed.prepareSnooze("bank"))
+
+        timed.abortSnooze("Notification unavailable")
+        assertNull(timed.state.snoozedForPackage)
+        assertNotNull(scheduler.action)
+
+        elapsedMillis += scheduler.delayMillis!!
+        scheduler.fire()
+        assertEquals(listOf(false, true), settings.writes)
+        assertEquals(2, sampler.calls)
+    }
+
+    @Test fun abortedSnoozeKeepsItsFailureAfterAnAsynchronousUsageResult() {
+        sampler.provider = { sample(9 * 60) }
+        val timed = timedEngine()
+        timed.setSnoozePackages(setOf("bank"))
+        start(timed)
+        timed.onForeground("selected", true)
+        assertTrue(timed.prepareSnooze("bank"))
+        assertTrue(timed.restoreColorForSnooze())
+        sampler.autoRespond = false
+
+        timed.abortSnooze("Accessibility disable failed")
+        val (_, callback) = sampler.pending.single()
+        callback(sample(9 * 60))
+        assertEquals("Accessibility disable failed", timed.state.error)
+        assertNotNull(scheduler.action)
+    }
+
+    @Test fun failedPolicyRestorationAfterAbortedSnoozeKeepsTheNewSettingsError() {
+        val timed = timedEngine()
+        timed.setSnoozePackages(setOf("bank"))
+        start(timed)
+        timed.onForeground("selected", true)
+        assertTrue(timed.prepareSnooze("bank"))
+        assertTrue(timed.restoreColorForSnooze())
+        settings.providerThrows = true
+
+        timed.abortSnooze("Accessibility disable failed")
+        assertFalse(timed.state.managerEnabled)
+        assertTrue(timed.state.error!!.contains("Could not change Android Color correction"))
+        assertNull(scheduler.action)
+    }
+
+    @Test fun missingUsageAccessKeepsColorButImmediateStillGreys() {
+        usageAccess = false
+        sampler.provider = { error("Usage should not be sampled without access") }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(false), settings.writes)
+        assertEquals(0, sampler.calls)
+        assertTrue(timed.state.managerEnabled)
+        assertTrue(timed.state.usageError!!.contains("Open Setup"))
+        assertNull(scheduler.action)
+
+        timed.setGrayAfterMinutes(mapOf("selected" to 0))
+        assertEquals(listOf(false, true), settings.writes)
+    }
+
+    @Test fun grantingUsageAccessClearsTheRequirementMessage() {
+        usageAccess = false
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertTrue(timed.state.usageError!!.contains("Open Setup"))
+
+        usageAccess = true
+        sampler.provider = { sample(0) }
+        timed.refreshPrerequisites()
+        assertNull(timed.state.usageError)
+        assertNotNull(scheduler.action)
+    }
+
+    @Test fun grayAppKeepsNoDeadlineAndRegainsAllowanceOnTheNewDay() {
+        wallMillis = Instant.parse("2026-10-18T23:50:00Z").toEpochMilli()
+        sampler.provider = { sample(10 * 60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(true), settings.writes)
+        assertNull(scheduler.action)
+        timed.onForeground("selected", true)
+        assertEquals(1, sampler.calls)
+
+        wallMillis += 10 * 60_000L
+        sampler.provider = { sample(0) }
+        timed.onTimeChanged()
+        assertEquals(listOf(true, false), settings.writes)
+        assertEquals(2, sampler.calls)
+        assertEquals(570_000L, scheduler.delayMillis)
+    }
+
+    @Test fun oldDeadlineDoesNotApplyToTheNewDay() {
+        wallMillis = Instant.parse("2026-10-18T23:59:00Z").toEpochMilli()
+        sampler.provider = { sample(0) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        val oldDeadline = scheduler.action!!
+        assertEquals(570_000L, scheduler.delayMillis)
+        assertEquals(1, sampler.calls)
+
+        wallMillis += 2 * 60_000L
+        elapsedMillis += 2 * 60_000L
+        oldDeadline()
+        assertEquals(2, sampler.calls)
+        assertEquals(listOf(false), settings.writes)
+        assertEquals(570_000L, scheduler.delayMillis)
+    }
+
+    @Test fun allowanceChangeReplacesThePendingDeadlineAndInvalidatesTheOldCallback() {
+        sampler.provider = { sample(60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        val oldDeadline = scheduler.action!!
+        assertEquals(510_000L, scheduler.delayMillis)
+
+        timed.setGrayAfterMinutes(mapOf("selected" to 5))
+        assertEquals(2, sampler.calls)
+        assertEquals(210_000L, scheduler.delayMillis)
+        assertEquals(listOf(false), settings.writes)
+
+        oldDeadline()
+        assertEquals(listOf(false), settings.writes)
+        assertEquals(210_000L, scheduler.delayMillis)
+    }
+
+    @Test fun timeChangeResamplesCurrentDestination() {
+        sampler.provider = { sample(0) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(scheduler.action)
+
+        sampler.provider = { sample(11 * 60) }
+        timed.onTimeChanged()
+        assertEquals(listOf(false, true), settings.writes)
+        assertEquals(2, sampler.calls)
+    }
+
+    @Test fun disablingCancelsTheDeadline() {
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(scheduler.action)
+
+        timed.setEnabled(false)
+        assertNull(scheduler.action)
+        assertFalse(timed.state.managerEnabled)
+    }
+
+    @Test fun policyChangeCancelsDelayedDestination() {
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertNotNull(scheduler.action)
+
+        timed.setPolicy(Policy.EXCEPT_SELECTED)
+        assertNull(scheduler.action)
+        assertEquals(listOf(false), settings.writes)
+    }
+
+    @Test fun raisingAllowanceKeepsGrayWhenTotalUsageExceedsIt() {
+        sampler.provider = { sample(10 * 60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(true), settings.writes)
+
+        sampler.provider = { sample(40 * 60) }
+        timed.setGrayAfterMinutes(mapOf("selected" to 30))
+        assertEquals(listOf(true), settings.writes)
+        assertEquals(2, sampler.calls)
+    }
+
+    @Test fun increasingAppOverrideWhileManagerIsForegroundRestoresColorOnReturn() {
+        sampler.provider = { sample(10 * 60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.onForeground("selected", true)
+        assertEquals(listOf(true), settings.writes)
+
+        timed.onForeground("manager", true)
+        assertEquals(listOf(true, false), settings.writes)
+
+        timed.setGrayAfterMinutes(mapOf("selected" to 20))
+        assertEquals(listOf(true, false), settings.writes)
+
+        sampler.provider = { sample(10 * 60) }
+        timed.onForeground("selected", true)
+        assertEquals(listOf(true, false), settings.writes)
+        assertEquals(570_000L, scheduler.delayMillis)
     }
 
     @Test fun autoSnoozeCandidatesAreConfiguredAppsWithoutPendingSnooze() {

@@ -33,13 +33,16 @@ data class ManagerUiState(
     val appsError: String? = null,
     val transientError: String? = null,
 ) {
-    fun visibleApps(selectedPackages: Set<String>): List<InstalledApp> {
+    fun visibleApps(selectedPackages: Set<String>, customPackages: Set<String> = emptySet()): List<InstalledApp> {
         val needle = query.trim().lowercase()
         val filtered = if (needle.isEmpty()) apps else apps.filter {
             it.label.lowercase().contains(needle) || it.packageName.lowercase().contains(needle)
         }
-        // AppCatalog is already locale-sorted. This stable sort only lifts selections.
-        return filtered.sortedByDescending { it.packageName in selectedPackages }
+        // Preserve AppCatalog's locale order within each group.
+        return filtered.sortedWith(
+            compareBy<InstalledApp> { it.packageName !in selectedPackages }
+                .thenBy { it.packageName !in customPackages },
+        )
     }
 }
 
@@ -91,6 +94,17 @@ class ManagerViewModel internal constructor(
     fun setQuery(query: String) = _uiState.update { it.copy(query = query) }
     fun setEnabled(enabled: Boolean) = mutate { controller.setEnabled(enabled) }
     fun setPolicy(policy: Policy) = mutate { controller.setPolicy(policy) }
+    fun setDefaultGrayAfterMinutes(minutes: Int) = mutate {
+        controller.setDefaultGrayAfterMinutes(minutes)
+    }
+    fun resetAllGrayAfterMinutes() = mutate {
+        controller.setDefaultGrayAfterMinutes(0, clearOverrides = true)
+    }
+    fun setGrayAfterMinutes(packageName: String, minutes: Int?) = mutate {
+        val values = _uiState.value.manager?.grayAfterMinutes.orEmpty().toMutableMap()
+        if (minutes == null) values.remove(packageName) else values[packageName] = minutes
+        controller.setGrayAfterMinutes(values)
+    }
     fun togglePackage(packageName: String, selected: Boolean) = mutate {
         val packages = _uiState.value.manager?.selectedPackages.orEmpty().toMutableSet()
         if (selected) packages += packageName else packages -= packageName

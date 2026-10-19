@@ -1,5 +1,8 @@
 package now.abhi.graycie
 
+import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.NumberPicker
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
@@ -27,16 +30,25 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.UiController
+import androidx.test.espresso.ViewAction
+import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
+import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import now.abhi.graycie.ui.GraycieTheme
 import now.abhi.graycie.ui.ManagerContent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.hamcrest.Matcher
 
 class ManagerScreenTest {
     @get:Rule val compose = createComposeRule()
@@ -92,8 +104,9 @@ class ManagerScreenTest {
         compose.onNodeWithTag("setup-screen").assertExists()
         compose.onNodeWithText("Graycie is ready.").assertDoesNotExist()
         compose.onNodeWithText("Two small steps", substring = true).assertDoesNotExist()
-        compose.onNodeWithText("Both permissions stay under your control", substring = true).assertExists()
-        compose.onNodeWithTag("information-block").performScrollTo().assertExists()
+        compose.onNodeWithText("Usage Access is needed only for timed grayscale", substring = true).assertExists()
+        compose.onNodeWithTag("setup-screen").performScrollToNode(hasTestTag("information-block"))
+        compose.onNodeWithTag("information-block").assertExists()
         compose.onNodeWithText("For Your Information").assertExists()
         compose.onNodeWithContentDescription("Information").assertExists()
         compose.onNodeWithText(
@@ -121,6 +134,102 @@ class ManagerScreenTest {
         compose.onNodeWithTag("policy:only_selected").assertIsSelected()
         compose.onNodeWithText("Except These").performClick()
         assertEquals(Policy.EXCEPT_SELECTED, policy)
+    }
+
+    @Test fun durationWheelsSaveOnlyOnSet() {
+        var saved: Int? = null
+        var resetAll = false
+        setContent(
+            snapshot().copy(defaultGrayAfterMinutes = 105),
+            setDefaultGrayAfterMinutes = { saved = it },
+            resetAllGrayAfterMinutes = { resetAll = true },
+        )
+        compose.onNodeWithTag("feature-grayscale").performClick()
+        compose.onNodeWithTag("default-timer").performClick()
+        incrementWheel("Hours")
+        compose.onNodeWithText("Cancel").performClick()
+        assertNull(saved)
+
+        compose.onNodeWithTag("default-timer").performClick()
+        incrementWheel("Hours")
+        compose.onNodeWithText("Set").performClick()
+        assertEquals(165, saved)
+        compose.onNodeWithText("Set").assertDoesNotExist()
+
+        compose.onNodeWithTag("default-timer").performClick()
+        compose.onNodeWithText("Reset all to Immediate").performScrollTo().performClick()
+        assertTrue(resetAll)
+        compose.onNodeWithText("Set").assertDoesNotExist()
+    }
+
+    @Test fun durationWheelsDefaultToZeroAndSupportQuickChoices() {
+        var saved: Int? = null
+        setContent(snapshot(), setDefaultGrayAfterMinutes = { saved = it })
+        compose.onNodeWithTag("feature-grayscale").performClick()
+        compose.onNodeWithTag("default-timer").performClick()
+        for (label in listOf("Hours", "Minutes")) {
+            onView(withContentDescription(label)).check { view, error ->
+                if (error != null) throw error
+                assertEquals(0, (view as NumberPicker).value)
+            }
+        }
+        compose.onNodeWithText("20 min").performClick()
+        compose.onNodeWithText("Set").performClick()
+        assertEquals(20, saved)
+    }
+
+    @Test fun usageAccessIsAnOptionalThirdSetupStep() {
+        var enabled = false
+        var openedUsageAccess = false
+        setContent(
+            snapshot().copy(defaultGrayAfterMinutes = 10),
+            setEnabled = { enabled = it },
+            openUsageAccess = { openedUsageAccess = true },
+        )
+        compose.onNodeWithTag("master-switch").performClick()
+        assertTrue(enabled)
+        compose.onNodeWithTag("feature-grayscale").performClick()
+        compose.onNodeWithTag("open-usage-access").assertDoesNotExist()
+        compose.onNodeWithTag("navigate-back").performClick()
+        compose.onNodeWithTag("open-setup").performClick()
+        compose.onNodeWithTag("setup-screen").performScrollToNode(hasTestTag("open-usage-access"))
+        compose.onNodeWithTag("open-usage-access").performClick()
+        assertTrue(openedUsageAccess)
+        compose.onNodeWithText("03").assertExists()
+        compose.onNodeWithText("Optional").assertExists()
+    }
+
+    @Test fun positiveDelayWithoutUsageAccessShowsBanner() {
+        setContent(snapshot().copy(defaultGrayAfterMinutes = 10))
+        compose.onNodeWithTag("feature-grayscale").performClick()
+        compose.onNodeWithTag("grayscale-control-screen")
+            .performScrollToNode(hasTestTag("manager-error"))
+        compose.onNodeWithText("Usage Access is required", substring = true).assertExists()
+    }
+
+    @Test fun positiveDelayWithUsageAccessShowsNoBanner() {
+        setContent(snapshot().copy(defaultGrayAfterMinutes = 10, usageAccessGranted = true))
+        compose.onNodeWithTag("feature-grayscale").performClick()
+        compose.onNodeWithTag("manager-error").assertDoesNotExist()
+    }
+
+    @Test fun appDurationWheelsCapAtOneDayAndCanReturnToGlobal() {
+        var saved: Pair<String, Int?>? = null
+        setContent(
+            snapshot(selected = setOf("browser")).copy(grayAfterMinutes = mapOf("browser" to 1439)),
+            apps = listOf(app("Browser", "browser")),
+            setGrayAfterMinutes = { name, minutes -> saved = name to minutes },
+        )
+        compose.onNodeWithTag("feature-grayscale").performClick()
+        compose.onNodeWithTag("app-timer:browser").performScrollTo().performClick()
+        compose.onNodeWithText("Reset all to Immediate").assertDoesNotExist()
+        incrementWheel("Hours")
+        compose.onNodeWithText("Set").performClick()
+        assertEquals("browser" to 1440, saved)
+
+        compose.onNodeWithTag("app-timer:browser").performClick()
+        compose.onNodeWithText("Use global (Immediate)").performClick()
+        assertEquals("browser" to null, saved)
     }
 
     @Test fun searchUsesLabelAndPackageAndSelectionIsImmediate() {
@@ -299,6 +408,10 @@ class ManagerScreenTest {
         toggleSnooze: (String, Boolean) -> Boolean = { _, _ -> true },
         openSafely: (String) -> Unit = {},
         resume: () -> Unit = {},
+        setDefaultGrayAfterMinutes: (Int) -> Unit = {},
+        resetAllGrayAfterMinutes: () -> Unit = {},
+        setGrayAfterMinutes: (String, Int?) -> Unit = { _, _ -> },
+        openUsageAccess: () -> Unit = {},
     ) {
         compose.setContent {
             GraycieTheme {
@@ -307,10 +420,28 @@ class ManagerScreenTest {
                     setQuery = {}, setEnabled = setEnabled, setPolicy = setPolicy,
                     togglePackage = toggle, toggleSnoozePackage = toggleSnooze,
                     openSafely = openSafely, resumeFromSnooze = resume,
+                    setDefaultGrayAfterMinutes = setDefaultGrayAfterMinutes,
+                    resetAllGrayAfterMinutes = resetAllGrayAfterMinutes,
+                    setGrayAfterMinutes = setGrayAfterMinutes,
+                    openUsageAccessSettings = openUsageAccess,
                     refresh = {}, refreshApps = {}, openAccessibilitySettings = {},
                 )
             }
         }
+    }
+
+    private fun incrementWheel(label: String) {
+        compose.waitForIdle()
+        onView(withContentDescription(label)).perform(object : ViewAction {
+            override fun getConstraints(): Matcher<View> = isAssignableFrom(NumberPicker::class.java)
+            override fun getDescription() = "Increment $label through its accessibility action"
+            override fun perform(controller: UiController, view: View) {
+                assertTrue(view.accessibilityNodeProvider.performAction(
+                    View.NO_ID, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, null,
+                ))
+                controller.loopMainThreadForAtLeast(500L)
+            }
+        })
     }
 
     private fun snapshot(

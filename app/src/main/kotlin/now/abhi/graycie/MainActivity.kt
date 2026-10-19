@@ -29,6 +29,9 @@ class MainActivity : ComponentActivity() {
                     openAccessibilitySettings = {
                         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
+                    openUsageAccessSettings = {
+                        startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                    },
                 )
             }
         }
