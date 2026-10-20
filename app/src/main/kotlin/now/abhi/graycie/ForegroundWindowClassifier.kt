@@ -12,7 +12,6 @@ data class WindowMetadata(
 sealed interface ForegroundClassification {
     val reason: String
     data class Settled(val packageName: String, override val reason: String) : ForegroundClassification
-    data class HomeOverview(val packageName: String?, override val reason: String) : ForegroundClassification
     data class Temporary(override val reason: String) : ForegroundClassification
     data class Overlay(override val reason: String) : ForegroundClassification
     data class NonLaunchable(val packageName: String?, override val reason: String) : ForegroundClassification
@@ -25,7 +24,6 @@ class ForegroundWindowClassifier {
     fun classify(
         windows: List<WindowMetadata>,
         launchablePackages: Set<String>,
-        homePackages: Set<String>,
         retryExpired: Boolean = false,
     ): ForegroundClassification {
         if (windows.isEmpty()) return ForegroundClassification.Temporary("no interactive windows")
@@ -38,15 +36,13 @@ class ForegroundWindowClassifier {
             it.type == WINDOW_TYPE_APPLICATION && it.hasRoot && it.packageName != null && !it.pictureInPicture
         }
         val hasDivider = windows.any { it.type == WINDOW_TYPE_SPLIT_SCREEN_DIVIDER }
-        val layered = applicationWindows.mapNotNull { it.packageName }.distinct().size > 1
-        if (layered && !hasDivider) {
+        val fullScreenLayered = !focused.pictureInPicture &&
+            applicationWindows.mapNotNull { it.packageName }.distinct().size > 1
+        if (fullScreenLayered && !hasDivider) {
             return if (retryExpired) ForegroundClassification.Overlay("application layer persisted")
             else ForegroundClassification.Temporary("destination is layered with another application")
         }
         val candidate = focused.packageName
-        if (candidate in homePackages) {
-            return ForegroundClassification.HomeOverview(candidate, "Home or Overview settled")
-        }
         if (candidate !in launchablePackages) {
             return ForegroundClassification.NonLaunchable(candidate, "focused package is not launchable")
         }
@@ -73,14 +69,14 @@ class TransitionStabilizer(
     private val retryIntervalMs: Long = 100,
     private val retryWindowMs: Long = 1_000,
 ) {
-    private var pendingDestination: DestinationKey? = null
+    private var pendingDestination: String? = null
 
     fun reset() {
         pendingDestination = null
     }
 
     fun action(classification: ForegroundClassification, elapsedMs: Long): TransitionAction {
-        val destination = classification.destinationKey()
+        val destination = (classification as? ForegroundClassification.Settled)?.packageName
         if (destination != null) {
             if (destination == pendingDestination) return TransitionAction.Apply
             if (pendingDestination != null && elapsedMs >= retryWindowMs) {
@@ -102,17 +98,6 @@ class TransitionStabilizer(
 
     fun nextDelayMs(): Long = retryIntervalMs
     fun retryExpired(elapsedMs: Long): Boolean = elapsedMs >= retryWindowMs
-
-    private fun ForegroundClassification.destinationKey(): DestinationKey? = when (this) {
-        is ForegroundClassification.Settled -> DestinationKey.App(packageName)
-        is ForegroundClassification.HomeOverview -> DestinationKey.Home(packageName)
-        else -> null
-    }
-
-    private sealed interface DestinationKey {
-        data class App(val packageName: String) : DestinationKey
-        data class Home(val packageName: String?) : DestinationKey
-    }
 }
 
 /** Monotonic token used to make retries from an older event burst harmless. */

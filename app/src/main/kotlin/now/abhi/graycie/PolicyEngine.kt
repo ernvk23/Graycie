@@ -59,8 +59,9 @@ class PolicyEngine(
 ) {
     var state = store.read()
         private set
-    private var foregroundTarget: ForegroundTarget? = null
+    private var foregroundTarget: String? = null
     private var screenOn = true
+    private var locked = false
     private var evaluationGeneration = 0L
 
     private fun save(next: ManagerState) {
@@ -182,6 +183,7 @@ class PolicyEngine(
     fun onConnected() {
         cancelEvaluation()
         screenOn = true
+        locked = false
         // Persisted foreground and applied state cannot be trusted after reconnect/restart.
         foregroundTarget = null
         save(state.copy(lastRecognisedPackage = null, lastAppliedGrayscale = null))
@@ -193,21 +195,9 @@ class PolicyEngine(
         // Check before deduplication so revocation is caught even for repeated events.
         checkPrerequisites()
         if (packageName != ownPackage && !isLaunchable) return
-        val target = ForegroundTarget.App(packageName)
-        if (target == foregroundTarget) return
-        foregroundTarget = target
+        if (packageName == foregroundTarget) return
+        foregroundTarget = packageName
         if (packageName != state.lastRecognisedPackage) {
-            save(state.copy(lastRecognisedPackage = packageName))
-        }
-        evaluate()
-    }
-
-    fun onHome(packageName: String?) {
-        checkPrerequisites()
-        val target = ForegroundTarget.Home(packageName)
-        if (target == foregroundTarget) return
-        foregroundTarget = target
-        if (packageName != null && packageName != state.lastRecognisedPackage) {
             save(state.copy(lastRecognisedPackage = packageName))
         }
         evaluate()
@@ -222,6 +212,7 @@ class PolicyEngine(
     fun onDisconnected() {
         cancelEvaluation()
         foregroundTarget = null
+        locked = false
         if (state.snoozedForPackage != null) {
             save(state.copy(lastRecognisedPackage = null))
             return
@@ -230,16 +221,24 @@ class PolicyEngine(
         releaseGrayscale()
     }
 
-    /** Cancel the pending deadline until the device is unlocked; keep the current color state. */
-    fun onScreenOff() {
+    /** Locking shows the launcher's policy state and forgets the foreground app. */
+    fun onScreenOff(homePackage: String?) {
         screenOn = false
+        locked = true
         cancelEvaluation()
+        foregroundTarget = homePackage
+        if (!state.managerEnabled || state.snoozedForPackage != null || homePackage == null) {
+            releaseGrayscale()
+            return
+        }
+        evaluate()
     }
 
-    /** Read Android usage fresh on unlock. */
+    /** Unlock starts from a clean slate; the service reclassifies the current windows. */
     fun onUserPresent() {
         screenOn = true
-        if (state.managerEnabled && state.snoozedForPackage == null) evaluate()
+        locked = false
+        foregroundTarget = null
     }
 
     /** Clock, timezone, or date changes replace the deadline with a fresh sample. */
@@ -247,20 +246,15 @@ class PolicyEngine(
         if (state.managerEnabled && state.snoozedForPackage == null) evaluate()
     }
 
-    private fun evaluate(allowRetry: Boolean = true) {
+    private fun evaluate() {
         cancelEvaluation()
-        if (!state.managerEnabled || state.snoozedForPackage != null || !screenOn) return
+        if (!state.managerEnabled || state.snoozedForPackage != null || (!screenOn && !locked)) return
         if (usageAccess() && state.usageError == USAGE_ACCESS_ERROR) {
             setUsageError(null)
         }
         val target = foregroundTarget ?: return
-        if (target is ForegroundTarget.Home) {
-            applyGrayscale(true)
-            return
-        }
-        val packageName = (target as ForegroundTarget.App).packageName
-        val selected = packageName in state.selectedPackages
-        val grayscale = packageName != ownPackage && when (state.policy) {
+        val selected = target in state.selectedPackages
+        val grayscale = target != ownPackage && when (state.policy) {
             Policy.ONLY_SELECTED -> selected
             Policy.EXCEPT_SELECTED -> !selected
         }
@@ -268,7 +262,7 @@ class PolicyEngine(
             applyGrayscale(false)
             return
         }
-        val minutes = state.grayAfterMinutes[packageName] ?: state.defaultGrayAfterMinutes
+        val minutes = state.grayAfterMinutes[target] ?: state.defaultGrayAfterMinutes
         val allowanceSeconds = minutes.coerceAtLeast(0) * 60L
         if (allowanceSeconds <= 0L) {
             applyGrayscale(true)
@@ -280,8 +274,8 @@ class PolicyEngine(
             return
         }
         val generation = evaluationGeneration
-        usageSampler.sample(packageName) { sample ->
-            onSample(generation, packageName, allowanceSeconds, sample, allowRetry)
+        usageSampler.sample(target) { sample ->
+            onSample(generation, target, allowanceSeconds, sample)
         }
     }
 
@@ -290,14 +284,12 @@ class PolicyEngine(
         packageName: String,
         allowanceSeconds: Long,
         sample: UsageSample,
-        allowRetry: Boolean,
     ) {
         if (generation != evaluationGeneration || !isActive(packageName)) return
         when (sample) {
             UsageSample.Unavailable -> {
                 setUsageError(USAGE_UNAVAILABLE_ERROR)
                 applyGrayscale(false, clearError = false)
-                if (allowRetry) scheduleRetry(generation, packageName)
             }
             is UsageSample.Available -> {
                 if (sample.dayStartMillis != startOfTodayMillis(nowWallMillis(), zone())) {
@@ -315,38 +307,23 @@ class PolicyEngine(
                     return
                 }
                 applyGrayscale(false, clearError = false)
+                if (locked) return
                 if (generation != evaluationGeneration || !isActive(packageName)) return
                 scheduler.schedule(delayMillis) {
-                    onDeadline(generation, packageName, sample.dayStartMillis)
+                    onDeadline(generation, packageName)
                 }
             }
         }
     }
 
-    private fun scheduleRetry(generation: Long, packageName: String) {
+    private fun onDeadline(generation: Long, packageName: String) {
         if (generation != evaluationGeneration || !isActive(packageName)) return
-        scheduler.schedule(USAGE_RETRY_DELAY_MILLIS) {
-            if (generation == evaluationGeneration) evaluate(allowRetry = false)
-        }
-    }
-
-    private fun onDeadline(
-        generation: Long,
-        packageName: String,
-        sampledDayStartMillis: Long,
-    ) {
-        if (generation != evaluationGeneration || !isActive(packageName)) return
-        if (sampledDayStartMillis != startOfTodayMillis(nowWallMillis(), zone())) {
-            // The local day changed before the deadline; the new day needs a fresh sample.
-            evaluate()
-            return
-        }
-        applyGrayscale(true, clearError = false)
+        evaluate()
     }
 
     private fun isActive(packageName: String): Boolean =
-        state.managerEnabled && state.snoozedForPackage == null && screenOn &&
-            foregroundTarget == ForegroundTarget.App(packageName)
+        state.managerEnabled && state.snoozedForPackage == null && (screenOn || locked) &&
+            foregroundTarget == packageName
 
     private fun setUsageError(message: String?) {
         if (state.usageError == message) return
@@ -406,10 +383,5 @@ class PolicyEngine(
         }
         save(state.copy(managerEnabled = false, lastAppliedGrayscale = null,
             ownsColorCorrection = ownsColorCorrection, error = error))
-    }
-
-    private sealed interface ForegroundTarget {
-        data class App(val packageName: String) : ForegroundTarget
-        data class Home(val packageName: String?) : ForegroundTarget
     }
 }

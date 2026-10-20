@@ -85,6 +85,13 @@ class PolicyEngineTest {
         sampledAtElapsedMillis = elapsedMillis,
     )
 
+    private fun accruingSample(initialUsedSeconds: Long) {
+        val initialElapsedMillis = elapsedMillis
+        sampler.provider = {
+            sample(initialUsedSeconds + (elapsedMillis - initialElapsedMillis) / 1_000L)
+        }
+    }
+
     private fun engine() = PolicyEngine("manager", store, settings, { serviceEnabled })
     private val engine = engine()
 
@@ -121,33 +128,9 @@ class PolicyEngineTest {
         engine.onForeground("also.selected", true)
         assertEquals(listOf(true), settings.writes)
         assertEquals("also.selected", engine.state.lastRecognisedPackage)
-        engine.onForeground("launcher", true)
+        engine.onForeground("other", true)
         engine.onForeground("selected", true)
         assertEquals(listOf(true, false, true), settings.writes)
-    }
-
-    @Test fun homeIsAlwaysGrayscaleInBothPolicies() {
-        start()
-        engine.onForeground("other", true)
-        engine.onHome("launcher")
-        engine.setPolicy(Policy.EXCEPT_SELECTED)
-        assertEquals(listOf(false, true), settings.writes)
-        assertEquals("launcher", engine.state.lastRecognisedPackage)
-    }
-
-    @Test fun returningFromHomeReappliesTheSameApp() {
-        start()
-        engine.onForeground("other", true)
-        engine.onHome("launcher")
-        engine.onForeground("other", true)
-        assertEquals(listOf(false, true, false), settings.writes)
-    }
-
-    @Test fun selectionChangesWhileHomeIsVisibleKeepItGrayscale() {
-        start(Policy.EXCEPT_SELECTED)
-        engine.onHome("launcher")
-        engine.setSelected(setOf("selected", "launcher"))
-        assertEquals(listOf(true), settings.writes)
     }
 
     @Test fun exceptSelectedAlwaysKeepsManagerInColor() {
@@ -390,8 +373,8 @@ class PolicyEngineTest {
         assertTrue(engine.state.error!!.contains("permission"))
     }
 
-    @Test fun oneEntrySampleTurnsAContinuouslyOpenAppGrayAtItsDeadline() {
-        sampler.provider = { sample(60) }
+    @Test fun deadlineResamplesTheSourceAndGreysWhenExhausted() {
+        accruingSample(60)
         val timed = timedEngine()
         start(timed)
         timed.onForeground("selected", true)
@@ -403,7 +386,7 @@ class PolicyEngineTest {
         wallMillis += scheduler.delayMillis!!
         scheduler.fire()
         assertEquals(listOf(false, true), settings.writes)
-        assertEquals(1, sampler.calls)
+        assertEquals(2, sampler.calls)
         assertNull(scheduler.action)
     }
 
@@ -428,7 +411,7 @@ class PolicyEngineTest {
     }
 
     @Test fun thirtyOneSecondsRemainingSchedulesTheFinalSecond() {
-        sampler.provider = { sample(569) }
+        accruingSample(569)
         val timed = timedEngine()
         start(timed)
         timed.onForeground("selected", true)
@@ -438,10 +421,10 @@ class PolicyEngineTest {
         elapsedMillis += 1_000L
         scheduler.fire()
         assertEquals(listOf(false, true), settings.writes)
-        assertEquals(1, sampler.calls)
+        assertEquals(2, sampler.calls)
     }
 
-    @Test fun unavailableUsageRetriesOnceThenRecoversOnLifecycleChange() {
+    @Test fun unavailableUsageWaitsForTheNextEvaluation() {
         sampler.provider = { UsageSample.Unavailable }
         val timed = timedEngine()
         start(timed)
@@ -449,31 +432,14 @@ class PolicyEngineTest {
         assertNotNull(timed.state.usageError)
         assertEquals(listOf(false), settings.writes)
         assertTrue(timed.state.managerEnabled)
-        assertEquals(USAGE_RETRY_DELAY_MILLIS, scheduler.delayMillis)
-
-        scheduler.fire()
-        assertEquals(2, sampler.calls)
         assertNull(scheduler.action)
-        assertNotNull(timed.state.usageError)
 
         sampler.provider = { sample(0) }
         timed.onTimeChanged()
         assertNull(timed.state.usageError)
-        assertEquals(3, sampler.calls)
+        assertEquals(2, sampler.calls)
         assertEquals(listOf(false), settings.writes)
         assertEquals(570_000L, scheduler.delayMillis)
-    }
-
-    @Test fun uncertainForegroundCancelsTheUsageRetry() {
-        sampler.provider = { UsageSample.Unavailable }
-        val timed = timedEngine()
-        start(timed)
-        timed.onForeground("selected", true)
-        assertNotNull(scheduler.action)
-
-        timed.onForegroundUncertain()
-        assertNull(scheduler.action)
-        assertEquals(1, sampler.calls)
     }
 
     @Test fun noConfiguredDelayGreysImmediately() {
@@ -576,25 +542,85 @@ class PolicyEngineTest {
         assertNull(scheduler.action)
     }
 
-    @Test fun screenOffStopsWorkAndUnlockUsesAFreshSample() {
+    @Test fun lockShowsLauncherColorAndDoesNotInheritTheApp() {
+        start()
+        engine.onForeground("selected", true)
+        assertEquals(listOf(true), settings.writes)
+
+        engine.onScreenOff("launcher")
+        assertEquals(listOf(true, false), settings.writes)
+        assertNull(scheduler.action)
+
+        engine.onUserPresent()
+        engine.onForeground("selected", true)
+        assertEquals(listOf(true, false, true), settings.writes)
+    }
+
+    @Test fun lockShowsLauncherGrayInExceptSelected() {
+        start(Policy.EXCEPT_SELECTED)
+        engine.onForeground("selected", true)
+        assertEquals(listOf(false), settings.writes)
+
+        engine.onScreenOff("launcher")
+        assertEquals(listOf(false, true), settings.writes)
+    }
+
+    @Test fun lockWithoutLauncherRestoresColor() {
+        start()
+        engine.onForeground("selected", true)
+
+        engine.onScreenOff(null)
+        assertEquals(1, settings.releases)
+        assertNull(engine.state.lastAppliedGrayscale)
+    }
+
+    @Test fun lockUsesLauncherDelayWithoutScheduling() {
+        sampler.provider = { sample(4 * 60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.setSelected(setOf("selected", "launcher"))
+
+        timed.onScreenOff("launcher")
+        assertEquals(1, sampler.calls)
+        assertEquals(listOf(false), settings.writes)
+        assertNull(scheduler.action)
+
+        timed.onUserPresent()
+        timed.onForeground("launcher", true)
+        assertEquals(2, sampler.calls)
+        assertNotNull(scheduler.action)
+    }
+
+    @Test fun lockUsesLauncherExhaustedAllowance() {
+        sampler.provider = { sample(10 * 60) }
+        val timed = timedEngine()
+        start(timed)
+        timed.setSelected(setOf("selected", "launcher"))
+
+        timed.onScreenOff("launcher")
+        assertEquals(listOf(true), settings.writes)
+        assertNull(scheduler.action)
+    }
+
+    @Test fun lockCancelsDeadlineAndUnlockSamplesOnlyAfterConfirmation() {
         sampler.provider = { sample(4 * 60) }
         val timed = timedEngine()
         start(timed)
         timed.onForeground("selected", true)
         assertNotNull(scheduler.action)
-
-        timed.onScreenOff()
-        assertNull(scheduler.action)
         val callsBeforeLock = sampler.calls
 
-        wallMillis += 60 * 60_000L
-        timed.onForeground("other", true)
-        timed.onForeground("selected", true)
-        assertEquals(callsBeforeLock, sampler.calls)
+        timed.onScreenOff("launcher")
         assertNull(scheduler.action)
+        assertEquals(callsBeforeLock, sampler.calls)
 
-        sampler.provider = { sample(4 * 60) }
+        wallMillis += 60 * 60_000L
         timed.onUserPresent()
+        assertNull(scheduler.action)
+        assertEquals(callsBeforeLock, sampler.calls)
+        assertEquals(listOf(false), settings.writes)
+
+        timed.onForeground("selected", true)
         assertEquals(callsBeforeLock + 1, sampler.calls)
         assertNotNull(scheduler.action)
         assertEquals(listOf(false), settings.writes)
@@ -644,7 +670,7 @@ class PolicyEngineTest {
     }
 
     @Test fun abortedSnoozeRestoresTheDeadline() {
-        sampler.provider = { sample(9 * 60) }
+        accruingSample(9 * 60)
         val timed = timedEngine()
         timed.setSnoozePackages(setOf("bank"))
         start(timed)
@@ -658,7 +684,7 @@ class PolicyEngineTest {
         elapsedMillis += scheduler.delayMillis!!
         scheduler.fire()
         assertEquals(listOf(false, true), settings.writes)
-        assertEquals(2, sampler.calls)
+        assertEquals(3, sampler.calls)
     }
 
     @Test fun abortedSnoozeKeepsItsFailureAfterAnAsynchronousUsageResult() {

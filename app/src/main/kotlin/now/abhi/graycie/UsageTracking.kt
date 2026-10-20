@@ -8,7 +8,6 @@ import java.time.ZoneId
 const val DEFAULT_GRAY_AFTER_MINUTES = 0
 const val MAX_GRAY_AFTER_MINUTES = 24 * 60
 const val USAGE_EXHAUSTED_MARGIN_SECONDS = 30L
-const val USAGE_RETRY_DELAY_MILLIS = 30_000L
 
 /** Schedules one main-thread usage callback after [delayMillis]. */
 interface UsageCheckScheduler {

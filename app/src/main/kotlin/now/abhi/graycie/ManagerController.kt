@@ -174,7 +174,7 @@ class ManagerController private constructor(private val context: Context) : Mana
     }
 
     override fun setSelectedPackages(packages: Set<String>) = onMain {
-        engine.setSelected(packages - activeHomePackages())
+        engine.setSelected(packages)
         publishState()
     }
 
@@ -192,7 +192,7 @@ class ManagerController private constructor(private val context: Context) : Mana
     }
 
     override fun setGrayAfterMinutes(packages: Map<String, Int>) = onMain {
-        engine.setGrayAfterMinutes(packages - activeHomePackages() - context.packageName)
+        engine.setGrayAfterMinutes(packages - context.packageName)
         publishState()
     }
 
@@ -253,8 +253,7 @@ class ManagerController private constructor(private val context: Context) : Mana
     fun publishState() {
         check(Looper.myLooper() == Looper.getMainLooper()) { "Controller state must be published on main" }
         val state = engine.state
-        val home = activeHomePackages()
-        val snoozePackages = state.snoozePackages - home - context.packageName
+        val snoozePackages = state.snoozePackages - activeHomePackages() - context.packageName
         val status = transitionStatus ?: when {
             state.snoozedForPackage != null -> ManagerStatus.SNOOZED
             state.managerEnabled -> ManagerStatus.ACTIVE
@@ -266,7 +265,7 @@ class ManagerController private constructor(private val context: Context) : Mana
             serviceEnabled = isServiceEnabled(),
             managerEnabled = state.managerEnabled,
             policy = state.policy,
-            selectedPackages = state.selectedPackages - home,
+            selectedPackages = state.selectedPackages,
             snoozePackages = snoozePackages,
             snoozedForPackage = state.snoozedForPackage,
             status = status,
@@ -275,7 +274,7 @@ class ManagerController private constructor(private val context: Context) : Mana
             lastAppliedGrayscale = state.lastAppliedGrayscale,
             error = state.error,
             defaultGrayAfterMinutes = state.defaultGrayAfterMinutes,
-            grayAfterMinutes = state.grayAfterMinutes - home - context.packageName,
+            grayAfterMinutes = state.grayAfterMinutes - context.packageName,
             usageAccessGranted = usageAccessGranted,
             usageError = state.usageError,
         )

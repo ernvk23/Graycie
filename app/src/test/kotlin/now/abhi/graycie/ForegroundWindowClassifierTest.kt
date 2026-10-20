@@ -8,13 +8,12 @@ import org.junit.Test
 class ForegroundWindowClassifierTest {
     private val classifier = ForegroundWindowClassifier()
     private val apps = setOf("app.one", "app.two", "pip")
-    private val homes = setOf("launcher")
 
     private fun app(packageName: String, focused: Boolean = true, pip: Boolean = false) =
         WindowMetadata(packageName, focused, focused, 1, pip)
 
     @Test fun settledApplicationIsAccepted() {
-        val result = classifier.classify(listOf(app("app.one")), apps, homes)
+        val result = classifier.classify(listOf(app("app.one")), apps)
         assertEquals("app.one", (result as ForegroundClassification.Settled).packageName)
     }
 
@@ -25,27 +24,23 @@ class ForegroundWindowClassifierTest {
         assertFalse(classifier.isOwnWindowFocused(listOf(app(own, pip = true)), own))
     }
 
-    @Test fun homeIsAStableDestination() {
-        assertTrue(classifier.classify(listOf(app("launcher")), apps, homes) is ForegroundClassification.HomeOverview)
+    @Test fun backgroundAppBehindFocusedAppDuringGestureIsTemporary() {
+        val gesture = listOf(app("app.one"), app("app.two", focused = false))
+        assertTrue(classifier.classify(gesture, apps) is ForegroundClassification.Temporary)
     }
 
-    @Test fun launcherBehindFocusedAppDuringGestureIsTemporary() {
-        val gesture = listOf(app("app.one"), app("launcher", focused = false))
-        assertTrue(classifier.classify(gesture, apps, homes) is ForegroundClassification.Temporary)
-    }
-
-    @Test fun systemUiOverHomeIsNotMistakenForOverview() {
+    @Test fun systemUiOverAnAppIsNotMistakenForDestination() {
         val overlay = listOf(
             WindowMetadata("system.ui", true, true, ForegroundWindowClassifier.WINDOW_TYPE_SYSTEM),
-            WindowMetadata("launcher", false, false, ForegroundWindowClassifier.WINDOW_TYPE_APPLICATION),
+            WindowMetadata("app.one", false, false, ForegroundWindowClassifier.WINDOW_TYPE_APPLICATION),
         )
-        assertTrue(classifier.classify(overlay, apps, homes) is ForegroundClassification.NonLaunchable)
+        assertTrue(classifier.classify(overlay, apps) is ForegroundClassification.NonLaunchable)
     }
 
     @Test fun layeredDestinationRetriesThenBecomesOverlay() {
         val windows = listOf(app("app.two"), app("app.one", focused = false))
-        assertTrue(classifier.classify(windows, apps, homes) is ForegroundClassification.Temporary)
-        assertTrue(classifier.classify(windows, apps, homes, retryExpired = true) is ForegroundClassification.Overlay)
+        assertTrue(classifier.classify(windows, apps) is ForegroundClassification.Temporary)
+        assertTrue(classifier.classify(windows, apps, retryExpired = true) is ForegroundClassification.Overlay)
     }
 
     @Test fun splitScreenAcceptsFocusedApp() {
@@ -53,18 +48,33 @@ class ForegroundWindowClassifierTest {
             app("app.two"), app("app.one", focused = false),
             WindowMetadata(null, false, false, ForegroundWindowClassifier.WINDOW_TYPE_SPLIT_SCREEN_DIVIDER),
         )
-        assertTrue(classifier.classify(windows, apps, homes) is ForegroundClassification.Settled)
+        assertTrue(classifier.classify(windows, apps) is ForegroundClassification.Settled)
     }
 
     @Test fun pictureInPictureDoesNotBlockDestination() {
-        val result = classifier.classify(listOf(app("app.two"), app("pip", false, true)), apps, homes)
-        assertTrue(result is ForegroundClassification.Settled)
+        val result = classifier.classify(listOf(app("app.two"), app("pip", false, true)), apps)
+        assertEquals("app.two", (result as ForegroundClassification.Settled).packageName)
+    }
+
+    @Test fun focusedPictureInPictureAppIsSettled() {
+        val result = classifier.classify(listOf(app("app.one", focused = false), app("pip", pip = true)), apps)
+        assertEquals("pip", (result as ForegroundClassification.Settled).packageName)
+    }
+
+    @Test fun focusedPictureInPictureAppOverridesLayeredFullScreenApps() {
+        val windows = listOf(
+            app("app.one", focused = false),
+            app("app.two", focused = false),
+            app("pip", pip = true),
+        )
+        val result = classifier.classify(windows, apps)
+        assertEquals("pip", (result as ForegroundClassification.Settled).packageName)
     }
 
     @Test fun transientsAndMissingRootsAreNotApplied() {
-        assertTrue(classifier.classify(listOf(app("keyboard")), apps, homes) is ForegroundClassification.NonLaunchable)
+        assertTrue(classifier.classify(listOf(app("keyboard")), apps) is ForegroundClassification.NonLaunchable)
         val missing = WindowMetadata(null, true, true, 1, hasRoot = false)
-        assertTrue(classifier.classify(listOf(missing), apps, homes) is ForegroundClassification.Temporary)
+        assertTrue(classifier.classify(listOf(missing), apps) is ForegroundClassification.Temporary)
     }
 
     @Test fun stabilizerRequiresTwoMatchingDestinationSamples() {
@@ -77,10 +87,10 @@ class ForegroundWindowClassifierTest {
     @Test fun changedDestinationRestartsConfirmation() {
         val stabilizer = TransitionStabilizer()
         val app = ForegroundClassification.Settled("app.one", "settled")
-        val home = ForegroundClassification.HomeOverview("launcher", "settled")
+        val second = ForegroundClassification.Settled("app.two", "settled")
         assertEquals(TransitionAction.Retry, stabilizer.action(app, 0))
-        assertEquals(TransitionAction.Retry, stabilizer.action(home, 100))
-        assertEquals(TransitionAction.Apply, stabilizer.action(home, 200))
+        assertEquals(TransitionAction.Retry, stabilizer.action(second, 100))
+        assertEquals(TransitionAction.Apply, stabilizer.action(second, 200))
     }
 
     @Test fun stabilizerStopsRetryingIndeterminateStateAfterOneSecond() {

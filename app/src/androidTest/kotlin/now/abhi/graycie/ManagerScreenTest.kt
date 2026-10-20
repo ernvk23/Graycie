@@ -369,14 +369,13 @@ class ManagerScreenTest {
         compose.onNodeWithTag("author-link").assertDoesNotExist()
     }
 
-    @Test fun ownAppAndHomeAreDisabled() {
+    @Test fun ownAppIsDisabled() {
         setContent(
-            snapshot = snapshot(selected = setOf("now.abhi.graycie", "launcher")),
-            apps = listOf(app("Graycie", "now.abhi.graycie"), app("Home", "launcher", home = true)),
+            snapshot = snapshot(selected = setOf("now.abhi.graycie")),
+            apps = listOf(app("Graycie", "now.abhi.graycie")),
         )
         compose.onNodeWithTag("feature-grayscale").performClick()
         compose.onNodeWithTag("app:now.abhi.graycie").assertIsNotEnabled()
-        compose.onNodeWithTag("app:launcher").assertIsNotEnabled()
         compose.onNodeWithText("Always in color", substring = true).assertExists()
     }
 
@@ -453,6 +452,6 @@ class ManagerScreenTest {
         selected, null, null, null,
     )
 
-    private fun app(label: String, packageName: String, home: Boolean = false) =
-        InstalledApp(packageName, label, null, home)
+    private fun app(label: String, packageName: String) =
+        InstalledApp(packageName, label, null, false)
 }

@@ -31,6 +31,7 @@ class ForegroundAccessibilityService : AccessibilityService() {
     private var homePackages = emptySet<String>()
     private var callbackRegistered = false
     private var screenReceiverRegistered = false
+    private var screenInactive = false
     private var eventGeneration = 0L
     private var transitionStartedAt = 0L
     private var lastUnlockEvaluationAt = 0L
@@ -38,12 +39,16 @@ class ForegroundAccessibilityService : AccessibilityService() {
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> controller.engine.onScreenOff()
+                Intent.ACTION_SCREEN_OFF -> {
+                    screenInactive = true
+                    cancelChecks()
+                    controller.engine.onScreenOff(controller.activeHomePackages().firstOrNull())
+                }
                 Intent.ACTION_SCREEN_ON -> {
                     // Without a keyguard there may be no later USER_PRESENT.
-                    if (!keyguardManager.isKeyguardLocked) evaluateUnlock()
+                    if (keyguardManager?.isKeyguardLocked != true) unlocked()
                 }
-                Intent.ACTION_USER_PRESENT -> evaluateUnlock()
+                Intent.ACTION_USER_PRESENT -> unlocked()
                 Intent.ACTION_TIME_CHANGED,
                 Intent.ACTION_TIMEZONE_CHANGED,
                 Intent.ACTION_DATE_CHANGED -> controller.engine.onTimeChanged()
@@ -51,13 +56,23 @@ class ForegroundAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun evaluateUnlock() {
+    private fun unlocked() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastUnlockEvaluationAt < UNLOCK_DEDUPE_MILLIS) return
         lastUnlockEvaluationAt = now
+        markUnlocked()
+        restartSettleWindow()
+    }
+
+    private fun markUnlocked() {
+        if (!screenInactive) return
+        screenInactive = false
         controller.refreshUsageAccess()
         controller.engine.onUserPresent()
     }
+
+    private fun screenReady(): Boolean =
+        powerManager?.isInteractive != false && keyguardManager?.isKeyguardLocked != true
 
     private val packagesChanged = object : LauncherApps.Callback() {
         override fun onPackageAdded(packageName: String, user: UserHandle) = refreshPackages()
@@ -96,15 +111,22 @@ class ForegroundAccessibilityService : AccessibilityService() {
             screenReceiverRegistered = true
         }
         controller.onServiceConnected()
-        if (powerManager?.isInteractive == false || keyguardManager?.isKeyguardLocked == true) {
-            controller.engine.onScreenOff()
+        screenInactive = powerManager?.isInteractive == false ||
+            keyguardManager?.isKeyguardLocked == true
+        if (screenInactive) {
+            controller.engine.onScreenOff(controller.activeHomePackages().firstOrNull())
+        } else {
+            // Reclassify the current window state instead of waiting for the next event.
+            restartSettleWindow()
         }
-        // Reapply the current window state instead of waiting for the next event.
-        restartSettleWindow()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
+        if (screenInactive) {
+            if (!screenReady()) return
+            markUnlocked()
+        }
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val eventPackage = event.packageName?.toString()
             if (eventPackage != null && controller.automaticSnooze(eventPackage) { disableSelf() }) {
@@ -128,7 +150,7 @@ class ForegroundAccessibilityService : AccessibilityService() {
     }
 
     private fun classifyForeground(generation: Long) {
-        if (generation != eventGeneration) return
+        if (generation != eventGeneration || screenInactive) return
         // The default Home app can change without its package being added, removed, or updated.
         homePackages = controller.activeHomePackages()
         val elapsed = (SystemClock.uptimeMillis() - transitionStartedAt).coerceAtLeast(0)
@@ -139,8 +161,7 @@ class ForegroundAccessibilityService : AccessibilityService() {
         }
         val classification = classifier.classify(
             windows = currentWindows,
-            launchablePackages = launchablePackages,
-            homePackages = homePackages,
+            launchablePackages = launchablePackages + homePackages,
             retryExpired = stabilizer.retryExpired(elapsed),
         )
         if (BuildConfig.DEBUG) {
@@ -152,8 +173,6 @@ class ForegroundAccessibilityService : AccessibilityService() {
                 when (classification) {
                     is ForegroundClassification.Settled ->
                         controller.engine.onForeground(classification.packageName, true)
-                    is ForegroundClassification.HomeOverview ->
-                        controller.engine.onHome(classification.packageName)
                     else -> error("Only stable destinations can be applied")
                 }
             }
@@ -178,6 +197,7 @@ class ForegroundAccessibilityService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         cancelChecks()
+        unregisterScreenReceiver()
         controller.onServiceDisconnected()
         return super.onUnbind(intent)
     }
@@ -186,11 +206,14 @@ class ForegroundAccessibilityService : AccessibilityService() {
         cancelChecks()
         controller.onServiceDisconnected()
         if (callbackRegistered) launcherApps.unregisterCallback(packagesChanged)
-        if (screenReceiverRegistered) {
-            unregisterReceiver(screenStateReceiver)
-            screenReceiverRegistered = false
-        }
+        unregisterScreenReceiver()
         super.onDestroy()
+    }
+
+    private fun unregisterScreenReceiver() {
+        if (!screenReceiverRegistered) return
+        runCatching { unregisterReceiver(screenStateReceiver) }
+        screenReceiverRegistered = false
     }
 
     private fun cancelChecks() {

@@ -865,7 +865,7 @@ private fun AppSelectionScreen(
             }
         }
         items(visibleApps, key = { it.packageName }) { app ->
-            val targetsThisApp = !app.isHome && app.packageName != manager.applicationId &&
+            val targetsThisApp = app.packageName != manager.applicationId &&
                 if (manager.policy == Policy.ONLY_SELECTED) {
                     app.packageName in manager.selectedPackages
                 } else {
@@ -1209,14 +1209,10 @@ private fun AppRow(
 ) {
     val view = LocalView.current
     val own = app.packageName == manager.applicationId
-    val selectable = !own && !app.isHome && !busy
-    val checked = !own && !app.isHome && app.packageName in if (snoozeMode)
+    val selectable = !own && !busy && (!snoozeMode || !app.isHome)
+    val checked = !own && app.packageName in if (snoozeMode)
         manager.snoozePackages else manager.selectedPackages
-    val detail = when {
-        own -> "${app.packageName}\nAlways in color"
-        app.isHome -> "${app.packageName}\nHome and Overview stay grayscale"
-        else -> app.packageName
-    }
+    val detail = if (own) "${app.packageName}\nAlways in color" else app.packageName
     Row(
         modifier = Modifier.fillMaxWidth().toggleable(
             value = checked,
