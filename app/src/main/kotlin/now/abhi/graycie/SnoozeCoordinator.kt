@@ -12,7 +12,7 @@ interface SnoozeAppLauncher {
     fun launch(packageName: String): Boolean
 }
 
-/** Coordinates ordering while keeping Android/provider edges injectable for tests. */
+/** Keeps snooze ordering around injected Android/provider boundaries. */
 class SnoozeCoordinator(
     private val engine: PolicyEngine,
     private val notifications: SnoozeNotifications,

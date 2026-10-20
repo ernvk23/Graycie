@@ -64,18 +64,14 @@ data class UsageHistoryWindow(
     val lookbackMillis: Long = EVENT_LOOKBACK_MILLIS,
 )
 
-/**
- * Reconstructs one package's foreground seconds for today from Android usage events.
- * Returns null when the retained history cannot establish where an unfinished session began.
- */
+/** Reconstructs today's foreground seconds for one package; null when history is ambiguous. */
 fun foregroundSecondsToday(
     events: List<UsageStamp>,
     packageName: String,
     window: UsageHistoryWindow,
 ): Long? {
     val scanStart = window.todayStartMillis - window.lookbackMillis
-    // The current boot also bounds unfinished sessions on APIs without startup events.
-    // Completed sessions before that boot still belong to today's usage.
+    // Boot bounds unfinished sessions; completed sessions before it still count today.
     val relevant = sequenceOf(UsageStamp(window.bootMillis, null, null, UsageStampType.STARTUP))
         .plus(events.asSequence())
         .filter { it.timestampMillis in scanStart..window.nowMillis }
@@ -127,8 +123,7 @@ fun foregroundSecondsToday(
             UsageStampType.BACKGROUND -> {
                 if (event.packageName != packageName) continue
                 if (activeStart == null) {
-                    // A background without a visible foreground start can be a duplicate or
-                    // a session that began before retained history. The latter is ambiguous.
+                    // A background without a visible start can be a duplicate or a pre-history session.
                     if (!sawTargetForeground && event.timestampMillis >= window.todayStartMillis) {
                         ambiguous = true
                     }

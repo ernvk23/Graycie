@@ -81,8 +81,7 @@ class SnoozeNotificationManager(private val context: Context) : SnoozeNotificati
     }
 
     companion object {
-        // Channel importance cannot be raised after creation, so use a new ID to
-        // migrate installs that already created the former low-importance channel.
+        // Channel importance cannot be raised after creation; a new ID migrates old installs.
         const val CHANNEL_ID = "snooze_recovery_active"
         const val NOTIFICATION_ID = 120
         const val ACTION_RESUME = "now.abhi.graycie.action.RESUME_SNOOZE"

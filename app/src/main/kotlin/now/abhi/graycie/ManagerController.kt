@@ -100,8 +100,7 @@ class ManagerController private constructor(private val context: Context) : Mana
             lastAppliedGrayscale = if (preferences.contains("lastAppliedGrayscale"))
                 preferences.getBoolean("lastAppliedGrayscale", false) else null,
             error = preferences.getString("error", null),
-            // Older versions only recorded the applied value. A recorded grayscale
-            // application is enough evidence to retain cleanup responsibility.
+            // Older builds only recorded the applied value; grayscale still implies ownership.
             ownsColorCorrection = preferences.getBoolean("ownsColorCorrection",
                 preferences.getBoolean("lastAppliedGrayscale", false)),
             defaultGrayAfterMinutes = preferences.getInt(
@@ -216,8 +215,7 @@ class ManagerController private constructor(private val context: Context) : Mana
 
     fun automaticSnooze(packageName: String, disableSelf: () -> Unit): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
-        // Window events are frequent, so non-candidates are rejected with the in-memory
-        // sets before any Home, permission, accessibility, or notification lookup.
+        // Reject non-candidates before any Home, permission, or notification lookup.
         if (!engine.state.isAutoSnoozeCandidate(packageName)) return false
         if (packageName == context.packageName || packageName in activeHomePackages()) return false
         return snooze.automatic(packageName, disableSelf).also { publishState() }
@@ -292,8 +290,7 @@ class ManagerController private constructor(private val context: Context) : Mana
 
     fun activeHomePackages(): Set<String> {
         if (Build.VERSION.SDK_INT >= 29) {
-            // ROLE_HOME identifies the platform-managed default-Home role. The public
-            // RoleManager API does not expose holders, so resolve that role's HOME intent.
+            // RoleManager exposes no holders, so resolve the role's HOME intent.
             val roleManager = context.getSystemService(RoleManager::class.java)
             if (!roleManager.isRoleAvailable(RoleManager.ROLE_HOME)) return emptySet()
         }

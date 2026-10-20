@@ -16,10 +16,7 @@ interface AccessibilityComponentControl {
     fun isOwnServiceEnabled(): Boolean
 }
 
-/**
- * Edits the live enabled-services value and never caches or reconstructs another app's
- * accessibility configuration. Unknown/malformed entries are deliberately preserved.
- */
+/** Edits only this app's entry in the live enabled-services value, preserving everything else. */
 class SecureAccessibilitySettings internal constructor(
     private val ownPackage: String,
     private val ownClass: String,
