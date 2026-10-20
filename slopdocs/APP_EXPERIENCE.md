@@ -5,7 +5,7 @@
 Graycie is a native Jetpack Compose interface with four saved destinations inside one scaffold:
 
 - **Home** contains the brand, master control, feature cards, current snooze recovery, and Setup shortcut.
-- **Grayscale Control** contains policy and grayscale app selection.
+- **Grayscale Control** contains policy and grayscale app selection, a default daily allowance and per-app timer overrides. Selected apps stay first, with custom-time apps first within each selected or unselected group. Usage Access is the optional third step in Setup.
 - **Auto-Snooze Apps** contains compatibility selection and Open safely actions.
 - **Setup** presents prerequisite status and setup actions.
 

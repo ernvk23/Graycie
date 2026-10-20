@@ -15,7 +15,7 @@ Two policies are available:
 
 "Color" keeps the user's saved non-grayscale Color correction and its on/off state. If the saved mode is grayscale, color apps disable correction instead, so the two policy destinations remain distinct.
 
-While management is on, Graycie itself stays in color and Home and launcher-hosted Overview stay grayscale. The active Home app cannot be selected.
+While management is on, Graycie itself stays in color. Home and launcher-hosted Overview follow the same policy as any other app. Locking the phone shows the launcher's current policy state and forgets the foreground app; unlocking starts clean and only reapplies grayscale if the app is foreground and still matches the policy.
 
 Opt-in **Auto-snooze** supports apps, such as banking apps, that refuse to run while an accessibility service is enabled. Automatic detection restores the previous Color correction, leaves an ongoing recovery notification, and calls Android's `disableSelf()`. **Open safely** is the reliable path: it disables and confirms accessibility before launching the selected app. Management stays logically enabled until the user explicitly resumes or turns it off.
 
@@ -26,8 +26,8 @@ The app identity is `now.abhi.graycie`. It is intentionally distinct from the fo
 Requirements are JDK 17 and an Android SDK with API 37 installed. Set only `sdk.dir` in the machine-local `local.properties` file.
 
 ```sh
-./gradlew :app:assembleDebug
-./gradlew :app:installDebug
+gradle :app:assembleDebug
+gradle :app:installDebug
 ```
 
 The project uses Gradle 9.3.1, AGP 9.1.1 with built-in Kotlin, Kotlin/Compose compiler plugin 2.4.0, Compose BOM 2026.08.00, `compileSdk 37`, `targetSdk 36`, and `minSdk 26`. Release APKs are intentionally unsigned; F-Droid applies its own signing key. Version 1.3.0 has version code 4.
@@ -61,7 +61,7 @@ When snoozed, press the notification **Resume** action or the in-app **Resume** 
 - `ManagerViewModel` collects native state, loads the localized app catalog on `Dispatchers.IO`, bounds icons as Android `Bitmap` objects, rejects stale loads, and holds transient UI state.
 - `PolicyEngine` and `SecureGrayscaleSettings` remain the tested policy and provider boundaries.
 - `SnoozeCoordinator`, `SecureAccessibilitySettings`, and `SnoozeNotificationManager` enforce snooze/recovery ordering while preserving every unrelated accessibility component.
-- `ForegroundAccessibilityService` debounces events for 250 ms and passes window metadata to a pure Kotlin classifier. Destinations are confirmed by two stable samples; layered app transitions are rechecked every 100 ms for at most one second. Home/Overview, persistent overlays, PiP, and split-screen are handled without inspecting window content.
+- `ForegroundAccessibilityService` debounces events for 250 ms and passes window metadata to a pure Kotlin classifier. Destinations are confirmed by two stable samples; layered app transitions are rechecked every 100 ms for at most one second. Home/Overview, persistent overlays, PiP, and split-screen are handled without inspecting window content; unfocused PiP does not override the focused app, and a focused PiP app follows its normal policy.
 - `ui/ManagerScreen.kt` provides saved Home, Grayscale Control, Auto-Snooze Apps, and Setup destinations in one scaffold. It uses the fixed warm-dark palette, reduced-motion-aware transitions, rounded shadcn-style CTAs, and accessible controls. The existing selector controls retain their continuous-corner shape.
 
 Unmodified Chat Favour Regular, Atkinson Hyperlegible, and the vendored Tabler Filled icons are bundled with their license/readme notices under `app/src/main/assets/licenses/`. Chat Favour is limited to the Home wordmark and lowercase-`a` brand glyph; interface headings use bold Atkinson. Chat Favour and its derived vector are declared as `NonFreeAssets` in the prepared F-Droid metadata because its bundled terms prohibit modification and do not expressly grant raw-font redistribution. Installed applications continue to use their real launcher icons.
@@ -71,9 +71,9 @@ The active Home application is resolved with `RoleManager.ROLE_HOME` on API 29+ 
 ## Verification
 
 ```sh
-./gradlew lint testDebugUnitTest assembleDebug assembleRelease
+gradle lint testDebugUnitTest assembleDebug assembleRelease
 # With an emulator/device:
-./gradlew connectedDebugAndroidTest
+gradle connectedDebugAndroidTest
 ```
 
 See [docs/TESTING.md](docs/TESTING.md) for device scenarios, [SPEC.md](SPEC.md) for the source specification, and [slopdocs/README.md](slopdocs/README.md) for a feature-by-feature breakdown of the implemented app.
