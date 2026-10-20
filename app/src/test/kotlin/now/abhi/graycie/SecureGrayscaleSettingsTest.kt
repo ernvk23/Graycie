@@ -42,6 +42,19 @@ class SecureGrayscaleSettingsTest {
         assertEquals(listOf(mode to 0, enabled to 1), access.writes)
     }
 
+    @Test fun reportsAppliedStateForGrayscaleAndColorTargets() {
+        correction(12, 1)
+        assertFalse(settings.isApplied(true))
+        assertTrue(settings.isApplied(false))
+
+        assertTrue(settings.setGrayscale(true))
+        assertTrue(settings.isApplied(true))
+        assertFalse(settings.isApplied(false))
+
+        access.values[enabled] = 0
+        assertFalse(settings.isApplied(true))
+    }
+
     @Test fun colorDisablesCorrectionAndTransitionsSkipUnchangedWrites() {
         correction(0)
         assertTrue(settings.setGrayscale(true))

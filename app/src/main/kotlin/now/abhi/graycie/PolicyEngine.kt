@@ -6,6 +6,8 @@ import java.time.ZoneId
 enum class Policy { ONLY_SELECTED, EXCEPT_SELECTED }
 
 private const val PERMISSION_ERROR = "Secure settings permission is missing. Complete the ADB setup."
+internal const val SERVICE_ERROR =
+    "Accessibility is disabled. Enable Graycie in Accessibility settings."
 private const val USAGE_UNAVAILABLE_ERROR =
     "Android usage history is unavailable. Check Usage Access and try again."
 internal const val USAGE_ACCESS_ERROR =
@@ -26,7 +28,6 @@ data class ManagerState(
     val usageError: String? = null,
 )
 
-/** A configured app can trigger an automatic snooze only while none is pending. */
 internal fun ManagerState.isAutoSnoozeCandidate(packageName: String): Boolean =
     snoozedForPackage == null && packageName in snoozePackages
 
@@ -37,6 +38,8 @@ interface StateStore {
 
 interface GrayscaleSettings {
     fun hasPermission(): Boolean
+    /** True when the provider already holds the values this destination would apply. */
+    fun isApplied(enabled: Boolean): Boolean
     /** Return false when the provider refuses a write; may throw SecurityException. */
     fun setGrayscale(enabled: Boolean): Boolean
     /** Stop management and restore saved correction, preserving a newer manual choice. */
@@ -74,12 +77,12 @@ class PolicyEngine(
     fun checkPrerequisites() {
         if (!settings.hasPermission()) {
             cancelEvaluation()
-            save(state.copy(managerEnabled = state.managerEnabled && state.snoozedForPackage != null,
-                lastAppliedGrayscale = null,
-                error = PERMISSION_ERROR))
+            save(state.copy(lastAppliedGrayscale = null, error = PERMISSION_ERROR))
         } else if (!serviceEnabled() && state.managerEnabled && state.snoozedForPackage == null) {
-            setEnabled(false)
-        } else if (state.error == PERMISSION_ERROR) {
+            cancelEvaluation()
+            releaseGrayscale()
+            if (state.error == null) save(state.copy(error = SERVICE_ERROR))
+        } else if (state.error == PERMISSION_ERROR || state.error == SERVICE_ERROR) {
             save(state.copy(error = null))
         }
     }
@@ -213,12 +216,11 @@ class PolicyEngine(
         cancelEvaluation()
         foregroundTarget = null
         locked = false
-        if (state.snoozedForPackage != null) {
-            save(state.copy(lastRecognisedPackage = null))
-            return
+        save(state.copy(lastRecognisedPackage = null))
+        if (state.snoozedForPackage == null) {
+            releaseGrayscale()
+            if (state.managerEnabled && state.error == null) save(state.copy(error = SERVICE_ERROR))
         }
-        save(state.copy(managerEnabled = false, lastRecognisedPackage = null))
-        releaseGrayscale()
     }
 
     /** Locking shows the launcher's policy state and forgets the foreground app. */
@@ -249,6 +251,7 @@ class PolicyEngine(
     private fun evaluate() {
         cancelEvaluation()
         if (!state.managerEnabled || state.snoozedForPackage != null || (!screenOn && !locked)) return
+        if (state.error == PERMISSION_ERROR || state.error == SERVICE_ERROR) return
         if (usageAccess() && state.usageError == USAGE_ACCESS_ERROR) {
             setUsageError(null)
         }
@@ -336,11 +339,10 @@ class PolicyEngine(
     }
 
     private fun applyGrayscale(enabled: Boolean, clearError: Boolean = true) {
-        if (state.lastAppliedGrayscale == enabled) return
         try {
+            if (state.lastAppliedGrayscale == enabled && settings.isApplied(enabled)) return
             if (!settings.hasPermission()) throw SecurityException("Permission missing")
-            // Persist ownership before writing so partial failures and restarts can
-            // clean up, without touching corrections when Graycie has never managed them.
+            // Persist ownership before writing so restarts can clean up after partial failures.
             save(state.copy(ownsColorCorrection = true))
             if (!settings.setGrayscale(enabled)) {
                 failChange("Android refused the color correction change. Check setup and try again.")
@@ -381,7 +383,7 @@ class PolicyEngine(
             if (restored) ownsColorCorrection = false
             if (!restored) error += " Previous Color correction could not be restored; check Android Color correction settings."
         }
-        save(state.copy(managerEnabled = false, lastAppliedGrayscale = null,
+        save(state.copy(lastAppliedGrayscale = null,
             ownsColorCorrection = ownsColorCorrection, error = error))
     }
 }

@@ -93,7 +93,7 @@ class OffStateColorCorrectionTest {
         assertEquals(12, access.values[SecureGrayscaleSettings.MODE])
         assertEquals(1, access.values[SecureGrayscaleSettings.ENABLED])
         assertFalse(store.state.ownsColorCorrection)
-        assertFalse(store.state.managerEnabled)
+        assertTrue(store.state.managerEnabled)
     }
 
     @Test fun snoozeRestoresCorrectionAndResumeCanManageAColorAppAgain() {
@@ -154,6 +154,19 @@ class OffStateColorCorrectionTest {
             assertEquals(1, access.values[SecureGrayscaleSettings.ENABLED])
             engine.setEnabled(false)
         }
+    }
+
+    @Test fun externalCorrectionChangeIsCorrectedOnNextEvaluation() {
+        val engine = engine()
+        engine.setSelected(setOf("selected"))
+        engine.setEnabled(true)
+        engine.onForeground("selected", true)
+        assertEquals(1, access.values[SecureGrayscaleSettings.ENABLED])
+
+        access.values[SecureGrayscaleSettings.ENABLED] = 0
+        engine.refreshPrerequisites()
+        assertEquals(0, access.values[SecureGrayscaleSettings.MODE])
+        assertEquals(1, access.values[SecureGrayscaleSettings.ENABLED])
     }
 
     private fun assertExistingCorrectionUntouched() {

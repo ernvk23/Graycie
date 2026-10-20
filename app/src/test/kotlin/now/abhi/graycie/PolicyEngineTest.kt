@@ -22,6 +22,7 @@ class PolicyEngineTest {
         var releases = 0
         val writes = mutableListOf<Boolean>()
         override fun hasPermission() = permission
+        override fun isApplied(enabled: Boolean) = writes.lastOrNull() == enabled
         override fun setGrayscale(enabled: Boolean): Boolean {
             if (revokeOnWrite) { permission = false; throw SecurityException() }
             if (providerThrows) throw IllegalStateException("Provider unavailable")
@@ -174,12 +175,12 @@ class PolicyEngineTest {
         assertTrue(settings.writes.isEmpty())
     }
 
-    @Test fun permissionRevokedOnDuplicateEventDisablesManagement() {
+    @Test fun permissionRevokedOnDuplicateEventKeepsIntentAndReportsError() {
         start()
         engine.onForeground("selected", true)
         settings.permission = false
         engine.onForeground("selected", true)
-        assertFalse(engine.state.managerEnabled)
+        assertTrue(engine.state.managerEnabled)
         assertNull(engine.state.lastAppliedGrayscale)
         assertNotNull(engine.state.error)
         assertEquals(listOf(true), settings.writes)
@@ -199,7 +200,7 @@ class PolicyEngineTest {
         start()
         settings.accepts = false
         engine.onForeground("selected", true)
-        assertFalse(engine.state.managerEnabled)
+        assertTrue(engine.state.managerEnabled)
         assertNull(engine.state.lastAppliedGrayscale)
         assertNotNull(engine.state.error)
         assertEquals(1, settings.releases)
@@ -219,13 +220,19 @@ class PolicyEngineTest {
         assertEquals(listOf(true, false), settings.writes)
     }
 
-    @Test fun serviceDisconnectRestoresColorAndDisablesManagement() {
+    @Test fun serviceDisconnectRestoresColorAndRetainsIntentUntilReconnect() {
         start()
         engine.onForeground("selected", true)
         engine.onDisconnected()
         assertEquals(listOf(true), settings.writes)
         assertEquals(1, settings.releases)
-        assertFalse(engine.state.managerEnabled)
+        assertTrue(engine.state.managerEnabled)
+        assertEquals(SERVICE_ERROR, engine.state.error)
+
+        engine.onConnected()
+        assertNull(engine.state.error)
+        engine.onForeground("selected", true)
+        assertEquals(listOf(true, true), settings.writes)
     }
 
     @Test fun rapidTransitionsRemainOrdered() {
@@ -245,14 +252,14 @@ class PolicyEngineTest {
         assertTrue(settings.writes.isEmpty())
     }
 
-    @Test fun regrantClearsSetupErrorWithoutAutomaticallyReenabling() {
+    @Test fun regrantClearsSetupErrorAndKeepsIntent() {
         start()
         settings.permission = false
         engine.checkPrerequisites()
         settings.permission = true
         engine.checkPrerequisites()
         assertNull(engine.state.error)
-        assertFalse(engine.state.managerEnabled)
+        assertTrue(engine.state.managerEnabled)
     }
 
     @Test fun colorAppKeepsManagementActiveWithoutReleasing() {
@@ -308,7 +315,7 @@ class PolicyEngineTest {
         assertEquals(2, settings.releases)
     }
 
-    @Test fun permissionLossRetainsOwnershipUntilCleanupCanRun() {
+    @Test fun permissionLossKeepsIntentAndOwnershipUntilRegrant() {
         start()
         engine.onForeground("selected", true)
         settings.permission = false
@@ -318,20 +325,29 @@ class PolicyEngineTest {
         settings.permission = true
         val restarted = engine()
         restarted.onConnected()
-        assertEquals(1, settings.releases)
-        assertFalse(restarted.state.ownsColorCorrection)
+        assertEquals(0, settings.releases)
+        assertTrue(restarted.state.ownsColorCorrection)
+        assertTrue(restarted.state.managerEnabled)
+        restarted.onForeground("selected", true)
+        assertEquals(listOf(true, true), settings.writes)
     }
 
-    @Test fun missingServiceReleasesManagement() {
+    @Test fun missingServiceReleasesCorrectionAndKeepsIntent() {
         start()
         engine.onForeground("selected", true)
         serviceEnabled = false
         engine.checkPrerequisites()
         assertEquals(1, settings.releases)
-        assertFalse(engine.state.managerEnabled)
+        assertTrue(engine.state.managerEnabled)
+        assertEquals(SERVICE_ERROR, engine.state.error)
+
+        serviceEnabled = true
+        engine.checkPrerequisites()
+        assertNull(engine.state.error)
+        assertTrue(engine.state.managerEnabled)
     }
 
-    @Test fun failedCleanupIsReportedWithoutRetrying() {
+    @Test fun failedCleanupIsReportedAndRetriedOnNextEvaluation() {
         start()
         settings.accepts = false
         settings.releaseAccepts = false
@@ -340,7 +356,7 @@ class PolicyEngineTest {
         assertTrue(engine.state.error!!.contains("could not be restored"))
         assertNull(engine.state.lastAppliedGrayscale)
         engine.onForeground("other", true)
-        assertEquals(1, settings.releases)
+        assertEquals(2, settings.releases)
     }
 
     @Test fun failedMasterOffDoesNotRetryOrCacheColor() {
@@ -354,12 +370,12 @@ class PolicyEngineTest {
         assertNotNull(engine.state.error)
     }
 
-    @Test fun providerExceptionDisablesAndCleansUpOnce() {
+    @Test fun providerExceptionCleansUpAndKeepsIntent() {
         start()
         settings.providerThrows = true
         engine.onForeground("selected", true)
         assertEquals(1, settings.releases)
-        assertFalse(engine.state.managerEnabled)
+        assertTrue(engine.state.managerEnabled)
         assertNull(engine.state.lastAppliedGrayscale)
     }
 
@@ -368,7 +384,7 @@ class PolicyEngineTest {
         settings.revokeOnWrite = true
         engine.onForeground("selected", true)
         assertEquals(0, settings.releases)
-        assertFalse(engine.state.managerEnabled)
+        assertTrue(engine.state.managerEnabled)
         assertNull(engine.state.lastAppliedGrayscale)
         assertTrue(engine.state.error!!.contains("permission"))
     }
@@ -714,7 +730,7 @@ class PolicyEngineTest {
         settings.providerThrows = true
 
         timed.abortSnooze("Accessibility disable failed")
-        assertFalse(timed.state.managerEnabled)
+        assertTrue(timed.state.managerEnabled)
         assertTrue(timed.state.error!!.contains("Could not change Android Color correction"))
         assertNull(scheduler.action)
     }

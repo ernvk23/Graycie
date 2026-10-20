@@ -23,7 +23,7 @@ While management is active, Graycie controls Android's Color correction setting 
 
 Before changing correction, Graycie durably saves the existing mode and on/off state. Turning management off, disconnecting the service, or snoozing restores the saved settings. A newer manual correction is preserved. The saved values and pending writes survive process restarts and failed restoration attempts. A session inherited from an older build has no original backup; cleanup can only disable its recognizable grayscale.
 
-If the secure-settings grant is missing, Android refuses a provider write, or another provider error occurs, Graycie disables normal management, attempts a safe color cleanup where possible, and shows an actionable error. Both prerequisites must be present before management can start again.
+If the secure-settings grant is missing, Android refuses a provider write, or another provider error occurs, Graycie attempts a safe color cleanup where possible, shows an actionable error, and keeps the master intent so management resumes when the prerequisite returns.
 
 ## Android integration
 

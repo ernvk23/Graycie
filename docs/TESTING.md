@@ -14,7 +14,7 @@ With an emulator or device available:
 ./gradlew connectedDebugAndroidTest
 ```
 
-JVM tests cover selected-first app ordering with custom times prioritized within each group, snooze transitions, duplicate events/disconnects, notification gating, cleanup failure, safe-launch ordering, reconnect-only recovery, enabled-accessibility-list parsing/preservation, and usage-history reconstruction including ongoing and midnight-crossing sessions, screen-off and reboot boundaries, and DST day boundaries. Policy tests verify the entry sample, the deadline re-sample, query-delivery delay accounting, the final 30-second allowance threshold, deadline cancellation on lock or uncertain foreground, lock matching the launcher without inheriting the app, fresh reads after app return and day/clock/allocation changes, unavailable-query recovery on the next evaluation, and cancellation/stale-result protection. Compose coverage includes the minimal Home hierarchy and rainbow/desaturated ON/OFF wordmark, feature navigation/back, disabled Night Light, Setup routing and information block, the Home-only author link, policy mapping, direct duration wheels with zero defaults, draft cancellation, and the 24-hour/global-override boundary, quick duration choices, optional Usage Access in Setup, the Usage Access banner for positive delays, Auto-snooze snackbars, safe launch, inline recovery UI, search, and narrow 200% text scrollability. Notification instrumentation verifies that Resume is an explicit receiver action rather than an activity launch and routes to direct recovery.
+JVM tests cover selected-first app ordering with custom times prioritized within each group, snooze transitions, duplicate events/disconnects, notification gating, cleanup failure, safe-launch ordering, reconnect-only recovery, enabled-accessibility-list parsing/preservation, and usage-history reconstruction including ongoing and midnight-crossing sessions, screen-off and reboot boundaries, and DST day boundaries. Policy tests verify the entry sample, the deadline re-sample, query-delivery delay accounting, the final 30-second allowance threshold, deadline cancellation on lock or uncertain foreground, lock matching the launcher without inheriting the app, fresh reads after app return and day/clock/allocation changes, unavailable-query recovery on the next evaluation, retained master intent across service and permission loss, idempotent reassertion after external correction changes, and cancellation/stale-result protection. Compose coverage includes the minimal Home hierarchy and rainbow/desaturated ON/OFF wordmark, feature navigation/back, disabled Night Light, Setup routing and information block, the Home-only author link, policy mapping, direct duration wheels with zero defaults, draft cancellation, and the 24-hour/global-override boundary, quick duration choices, optional Usage Access in Setup, the Usage Access banner for positive delays, Auto-snooze snackbars, safe launch, inline recovery UI, search, and narrow 200% text scrollability. Notification instrumentation verifies that Resume is an explicit receiver action rather than an activity launch and routes to direct recovery.
 
 ## Device setup
 
@@ -54,7 +54,7 @@ Grayscale must report mode `0` and enabled `1`. Color destinations must use the 
 | System UI-hosted Overview | Retains the current state when no portable destination can be identified |
 | Launcher catalog row | Active Home is selectable and follows the policy |
 | Cold or resumed app | Destination applies after settlement |
-| Accessibility reconnect or process restart | Reclassifies the current windows and restores the correct color without switching apps |
+| Accessibility reconnect or process restart | Reclassifies the current windows and restores the correct color without switching apps or re-toggling the master |
 | Rapid app cancellation | Only the newest event burst can apply |
 | Search overlay / keyboard | Retains current state unless a launchable destination settles |
 | Notification shade | Retains current color and suspends the pending deadline; returning to the same app reads fresh usage |
@@ -68,7 +68,8 @@ Grayscale must report mode `0` and enabled `1`. Color destinations must use the 
 | Delayed app, Usage Access granted | Uses Android's usage today, including use before Graycie started and while gray; grays at the allowance |
 | App left continuously open | Reads history once on entry and applies gray at the scheduled deadline with no intermediate queries; stops once gray; returning to the app or a date-change event reads fresh history |
 | Usage Access revoked while delayed | Next evaluation stays color and refreshes permission state after resume or unlock; the action remains in Setup |
-| Permission revoked | Management disables and setup/error state appears without a crash |
+| Permission revoked | Previous correction is restored if possible; the master intent and error remain, and regranting resumes without re-toggling |
+| Accessibility service disabled | Master stays on, the error identifies the missing service, and re-enabling resumes without re-toggling |
 | Large text / narrow screen | All content remains scrollable and controls remain usable |
 | First snooze selection on API 33+ | Permission prompt appears; denial does not save the selection |
 | Notifications/channel disabled | Snooze refuses to disable accessibility and shows a warning |

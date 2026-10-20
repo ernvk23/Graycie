@@ -13,6 +13,7 @@ class SnoozeCoordinatorTest {
         var cleanupWorks = true
         var releases = 0
         override fun hasPermission() = true
+        override fun isApplied(enabled: Boolean) = true
         override fun setGrayscale(enabled: Boolean) = true
         override fun release(): Boolean { releases++; order += "color"; return cleanupWorks }
     }

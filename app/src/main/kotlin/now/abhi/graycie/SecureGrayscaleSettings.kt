@@ -1,6 +1,6 @@
 package now.abhi.graycie
 
-/** Small provider boundary so write ordering and failures can be tested without Android. */
+/** Provider seam for testing write ordering and failures without Android. */
 interface SecureSettingsAccess {
     fun hasPermission(): Boolean
     fun readInt(key: String): Int?
@@ -30,20 +30,25 @@ class SecureGrayscaleSettings(
 ) : GrayscaleSettings {
     override fun hasPermission() = access.hasPermission()
 
+    override fun isApplied(enabled: Boolean): Boolean {
+        val current = readValues()
+        if (enabled) return current == CorrectionValues(0, 1)
+        val original = sessions.read()?.takeIf { !it.completed && it.matches(current) }?.original ?: current
+        val color = if (original.mode == 0) original.copy(enabled = 0) else original
+        return current == color
+    }
+
     override fun setGrayscale(enabled: Boolean): Boolean {
         requirePermission()
         val current = readValues()
-        val session = sessions.read()
+        val session = sessions.read()?.takeIf { !it.completed && it.matches(current) }
         // A manual correction becomes the baseline if management later takes over again.
-        if (session == null || session.completed || !session.matches(current)) {
-            save(CorrectionSession(current, current))
-        }
-        // Color apps keep the user's correction, except a grayscale baseline must be
-        // disabled so the color/grayscale policy still has distinct destinations.
+        if (session == null) save(CorrectionSession(current, current))
+        // Color apps keep the saved correction; a grayscale baseline must stay disabled.
         return if (enabled) {
             putIfChanged(MODE, 0) && putIfChanged(ENABLED, 1)
         } else {
-            val original = checkNotNull(sessions.read()).original
+            val original = session?.original ?: current
             val color = if (original.mode == 0) original.copy(enabled = 0) else original
             applyValues(color)
         }
@@ -53,8 +58,7 @@ class SecureGrayscaleSettings(
         requirePermission()
         val session = sessions.read()
         if (session == null) {
-            // Legacy sessions have no backup. Only remove recognizable monochromacy;
-            // never disable another correction whose origin cannot be established.
+            // Legacy sessions have no backup; only disable recognizable monochromacy.
             val current = readValues()
             val fallback = if (current.mode == 0) current.copy(enabled = 0) else current
             save(CorrectionSession(fallback, current))
@@ -73,8 +77,7 @@ class SecureGrayscaleSettings(
     }
 
     private fun applyValues(values: CorrectionValues, restoring: Boolean = false): Boolean {
-        // Disable before switching modes, then apply the saved switch. The journal
-        // tracks these steps without ending ownership during a color-app transition.
+        // Disable before switching modes; the journal keeps ownership through the transition.
         if (readValues().mode != values.mode &&
             !putIfChanged(ENABLED, 0, restoring)) return false
         return putIfChanged(MODE, values.mode, restoring) &&
